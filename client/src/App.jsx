@@ -1,16 +1,34 @@
+import { Routes,Route } from "react-router-dom";
+import Login from "./pages/Login";
+import Home from "./pages/Home";
+import Driver from "./pages/Driver";
+import Dispatcher from "./pages/Dispatcher";
+import NotFound from "./pages/NotFound";
+import MainLayout from "./layouts/MainLayout";
+import AuthLayout from "./layouts/AuthLayout";
+import ProtectedRoute from "./components/ProtectedRoute";
+import MapDemo from "./pages/MapDemo";
+
 function App() {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-900">
-      <div className="bg-white p-10 rounded-2xl shadow-xl">
-        <h1 className="text-4xl font-bold text-blue-600">
-          🚚 RouteIQ
-        </h1>
-
-        <p className="mt-4 text-gray-600">
-          Tailwind CSS is working successfully!
-        </p>
-      </div>
-    </div>
+    <Routes>
+      <Route element={<MainLayout />}>
+      
+      <Route path="/" element={<Home />} />
+      <Route path="/driver" element={ <ProtectedRoute> <Driver /> </ProtectedRoute> } />
+      <Route path="/dispatcher" element={  <ProtectedRoute> <Dispatcher /> </ProtectedRoute> } />
+      <Route path="/map" element={<MapDemo />} />
+       </Route>
+       
+    
+     
+      <Route element={<AuthLayout />}>
+       <Route path="/login" element={<Login />} />
+      
+      </Route>
+      <Route path="*" element={<NotFound />} /> 
+     
+    </Routes>
   );
 }
 
