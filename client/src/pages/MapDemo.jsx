@@ -1,69 +1,163 @@
-import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
-import { useState } from "react";
+import MapView from "../components/MapView";
+import { useEffect, useState } from "react";
 import initialStops from "../data/stops";
+import StopList from "../components/StopList";
+import AddStopForm from "../components/AddStopForm";
+import optimizeRoute from "../utils/optimizeRoute";
 
 function MapDemo() {
     const [name, setName] = useState("");
     const [latitude, setLatitude] = useState("");
     const [longitude, setLongitude] = useState("");
-    const [stops, setStops] = useState(initialStops);
-    console.log(stops);
 
-    function handleAddstop(){
-         console.log("Button clicked");
-    const newstop = {
-        id: stops.length+1,
-        name: name,
-        position: [Number(latitude), Number(longitude)]
-    };
-    setStops([...stops, newstop]);
-    console.log(newstop);
+    const [stops, setStops] = useState(() => {
+        const savedStops = localStorage.getItem("stops");
 
-     if (!name || !latitude || !longitude) {
-                alert("Please fill all fields");
-                return;
-            }
+        if (savedStops) {
+            return JSON.parse(savedStops);
+        }
 
+        return initialStops;
+    });
+
+    const [editingId, setEditingId] = useState(null);
+    const [selectedPosition, setSelectedPosition] = useState(null);
+
+    // Depot
+    const [depot, setDepot] = useState(null);
+
+    // Save stops
+    useEffect(() => {
+        localStorage.setItem("stops", JSON.stringify(stops));
+    }, [stops]);
+
+    // Map click
+    function handleMapClick(e) {
+        const { lat, lng } = e.latlng;
+
+        setLatitude(lat);
+        setLongitude(lng);
+        setSelectedPosition([lat, lng]);
     }
-   
+
+    // Add / Update Stop
+    function handleAddstop() {
+        if (!name || !latitude || !longitude) {
+            alert("Please fill all fields");
+            return;
+        }
+
+        if (editingId === null) {
+            const newStop = {
+                id: stops.length + 1,
+                name: name,
+                position: [
+                    Number(latitude),
+                    Number(longitude)
+                ]
+            };
+
+            setStops([...stops, newStop]);
+        } else {
+            setStops(
+                stops.map((stop) => {
+                    if (stop.id === editingId) {
+                        return {
+                            id: stop.id,
+                            name: name,
+                            position: [
+                                Number(latitude),
+                                Number(longitude)
+                            ]
+                        };
+                    }
+
+                    return stop;
+                })
+            );
+
+            setEditingId(null);
+        }
+
+        setName("");
+        setLatitude("");
+        setLongitude("");
+        setSelectedPosition(null);
+    }
+
+    // Delete Stop
+    function handleDeleteStop(id) {
+        setStops(
+            stops.filter((stop) => {
+                return stop.id !== id;
+            })
+        );
+    }
+
+    // Edit Stop
+    function handleEditStop(stop) {
+        setEditingId(stop.id);
+        setName(stop.name);
+        setLatitude(stop.position[0]);
+        setLongitude(stop.position[1]);
+    }
+
+    // Optimize route only when depot exists
+    const optimizedStops = depot
+        ? optimizeRoute(stops, depot)
+        : [];
+
+    // Convert optimized stops into coordinates
+    const routePositions = optimizedStops.map(
+        (stop) => stop.position
+    );
 
     return (
-        
         <>
-        <input placeholder="Stop Name" value={name} onChange={(e)=>setName(e.target.value)} />
-        <input placeholder="Latitude"  value={latitude} onChange={(e)=>setLatitude(e.target.value)} />
-        <input placeholder="Longitude"  value={longitude} onChange={(e)=>setLongitude(e.target.value)} />
-        
+            <AddStopForm
+                name={name}
+                latitude={latitude}
+                longitude={longitude}
+                setName={setName}
+                setLatitude={setLatitude}
+                setLongitude={setLongitude}
+                onAddStop={handleAddstop}
+                editingId={editingId}
+            />
 
-        <button onClick={handleAddstop}>
-                Add Stop
+            <button
+                onClick={() => {
+                    if (!selectedPosition) {
+                        alert("Click on the map to select depot");
+                        return;
+                    }
+
+                    setDepot(selectedPosition);
+                }}
+            >
+                Set Depot
             </button>
 
-        <MapContainer
-            center={[31.4685, 76.2708]}
-            zoom={15}
-            scrollWheelZoom={false}
-            style={{ height: "100vh", width: "100%" }}
-        >
+            {depot && (
+                <p>
+                    Depot: {depot[0]}, {depot[1]}
+                </p>
+            )}
 
-            <TileLayer
-                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                attribution='&copy; OpenStreetMap contributors'
+            <MapView
+                stops={stops}
+                onMapClick={handleMapClick}
+                selectedPosition={selectedPosition}
+                routePositions={routePositions}
             />
-            {stops.map((stop) => (
-                <Marker key={stop.id} position={stop.position}>
-                    <Popup>
-                        {stop.name}
-                    </Popup>
-                </Marker>
-            ))}
 
-        </MapContainer>
+            <StopList
+                stops={stops}
+                onDelete={handleDeleteStop}
+                onEdit={handleEditStop}
+            />
         </>
-
-    )
-
+    );
 }
-
 
 export default MapDemo;
