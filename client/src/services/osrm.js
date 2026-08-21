@@ -1,130 +1,188 @@
-// ─── OSRM Service ──────────────────────────────────────────────────────────
+import calculateDistance from "../utils/distance";
+
+// ─── OSRM Road-Network Routing & Distance Matrix Service ───────────────────
 //
 // WHAT IT DOES:
-//   Communicates with the free OSRM (Open Source Routing Machine) API to 
-//   get actual driving paths hugging the roads, and real driving distances.
+//   1. Fetches pairwise road distance/duration matrix (OSRM Table API)
+//   2. Caches matrices in-memory to prevent rate-limiting public demo servers
+//   3. Falls back gracefully to Haversine straight-line distance if offline
+//   4. Fetches exact GeoJSON driving geometry for Leaflet map polylines
 //
-// API DOCUMENTATION:
-//   http://project-osrm.org/docs/v5.24.0/api/#trip-service
-//
-// IMPORTANT DETAIL (Lat/Lng vs Lng/Lat):
-//   - Leaflet (and our app) uses: [latitude, longitude] (Y, X)
-//   - OSRM (and GeoJSON) uses:    [longitude, latitude] (X, Y)
-//   We MUST flip the coordinates before sending them to OSRM, and flip them 
-//   back when receiving the route data.
+// NOTE: Leaflet uses [latitude, longitude], OSRM uses [longitude, latitude].
 // ───────────────────────────────────────────────────────────────────────────
 
-// (Keeping this for basic A-to-B routing if ever needed)
+const OSRM_BASE_URL = "https://router.project-osrm.org";
+
+// In-memory LRU-style caches
+const matrixCache = new Map();
+const routeCache = new Map();
+const MAX_CACHE_SIZE = 100;
+
+function setCache(cache, key, value) {
+    if (cache.size >= MAX_CACHE_SIZE) {
+        const firstKey = cache.keys().next().value;
+        cache.delete(firstKey);
+    }
+    cache.set(key, value);
+}
+
+function getCoordsKey(waypoints) {
+    return waypoints
+        .map((p) => `${p[0].toFixed(5)},${p[1].toFixed(5)}`)
+        .join(";");
+}
+
+// ─── 1. Pairwise Distance & Duration Matrix API ────────────────────────────
+export async function fetchDistanceMatrix(waypoints) {
+    if (!waypoints || waypoints.length < 2) {
+        return {
+            distances: [[0]],
+            durations: [[0]],
+            source: "empty"
+        };
+    }
+
+    const cacheKey = getCoordsKey(waypoints);
+    if (matrixCache.has(cacheKey)) {
+        return matrixCache.get(cacheKey);
+    }
+
+    try {
+        // OSRM expects: lng,lat;lng,lat...
+        const coordsString = waypoints
+            .map((p) => `${p[1]},${p[0]}`)
+            .join(";");
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s timeout
+
+        const url = `${OSRM_BASE_URL}/table/v1/driving/${coordsString}?annotations=distance,duration`;
+        const res = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (!res.ok) throw new Error(`OSRM Table API returned status: ${res.status}`);
+
+        const data = await res.json();
+        if (data.code !== "Ok" || !data.distances) {
+            throw new Error(`OSRM Table API failed: ${data.code || "No distances"}`);
+        }
+
+        // Convert distances from meters to km, durations from seconds to minutes
+        const distancesKm = data.distances.map((row) =>
+            row.map((val) => (val !== null ? Math.round((val / 1000) * 100) / 100 : 99999))
+        );
+        const durationsMin = data.durations
+            ? data.durations.map((row) =>
+                  row.map((val) => (val !== null ? Math.round((val / 60) * 10) / 10 : 9999))
+              )
+            : null;
+
+        const result = {
+            distances: distancesKm,
+            durations: durationsMin,
+            source: "osrm_road_network"
+        };
+
+        setCache(matrixCache, cacheKey, result);
+        return result;
+    } catch (err) {
+        console.warn("⚠️ OSRM Table API unavailable, using Haversine distance matrix fallback:", err.message);
+
+        // Fallback: Build synthetic Haversine distance matrix
+        const n = waypoints.length;
+        const distances = Array.from({ length: n }, () => Array(n).fill(0));
+        const durations = Array.from({ length: n }, () => Array(n).fill(0));
+
+        for (let i = 0; i < n; i++) {
+            for (let j = 0; j < n; j++) {
+                if (i === j) {
+                    distances[i][j] = 0;
+                    durations[i][j] = 0;
+                } else {
+                    const distKm = calculateDistance(waypoints[i], waypoints[j]);
+                    distances[i][j] = Math.round(distKm * 100) / 100;
+                    // Estimate ~30 km/h urban speed -> 2 minutes per km
+                    durations[i][j] = Math.round(distKm * 2 * 10) / 10;
+                }
+            }
+        }
+
+        const fallbackResult = {
+            distances,
+            durations,
+            source: "haversine_fallback"
+        };
+
+        setCache(matrixCache, cacheKey, fallbackResult);
+        return fallbackResult;
+    }
+}
+
+// ─── 2. Driving Route Geometry API ─────────────────────────────────────────
 export async function getDrivingRoute(waypoints) {
     if (!waypoints || waypoints.length < 2) {
-        return { routePositions: [], distance: 0 };
+        return { routePositions: [], distance: 0, duration: 0 };
+    }
+
+    const cacheKey = getCoordsKey(waypoints);
+    if (routeCache.has(cacheKey)) {
+        return routeCache.get(cacheKey);
     }
 
     try {
         const coordsString = waypoints
-            .map((point) => `${point[1]},${point[0]}`) // flip to [lng, lat]
+            .map((point) => `${point[1]},${point[0]}`)
             .join(";");
 
-        const url = `https://router.project-osrm.org/route/v1/driving/${coordsString}?overview=full&geometries=geojson`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 4000);
 
-        const response = await fetch(url);
-        
-        if (!response.ok) throw new Error(`OSRM API error: ${response.status}`);
+        const url = `${OSRM_BASE_URL}/route/v1/driving/${coordsString}?overview=full&geometries=geojson`;
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) throw new Error(`OSRM Route API error: ${response.status}`);
         const data = await response.json();
 
         if (data.code !== "Ok" || !data.routes || data.routes.length === 0) {
-            return { routePositions: [], distance: 0 };
+            return fallbackStraightLineRoute(waypoints);
         }
 
         const route = data.routes[0];
-        const geoJsonCoords = route.geometry.coordinates; 
+        const geoJsonCoords = route.geometry.coordinates;
         const leafletCoords = geoJsonCoords.map((coord) => [coord[1], coord[0]]);
-        const distanceKm = route.distance / 1000;
+        const distanceKm = Math.round((route.distance / 1000) * 100) / 100;
+        const durationMin = Math.round((route.duration / 60) * 10) / 10;
 
-        return {
+        const result = {
             routePositions: leafletCoords,
-            distance: Math.round(distanceKm * 100) / 100 
+            distance: distanceKm,
+            duration: durationMin,
+            source: "osrm"
         };
+
+        setCache(routeCache, cacheKey, result);
+        return result;
     } catch (error) {
-        console.error("Error fetching driving route:", error);
-        return { routePositions: [], distance: 0 };
+        console.warn("⚠️ OSRM Route API failed, rendering straight-line polyline:", error.message);
+        return fallbackStraightLineRoute(waypoints);
     }
 }
 
-
-// ─── OSRM Trip API (TSP Solver) ────────────────────────────────────────────
-//
-// This replaces our JS Haversine math!
-// Instead of us sorting the stops and asking OSRM to connect them, we give
-// OSRM the unordered stops and it solves the Travelling Salesman Problem 
-// using REAL road driving distances (respecting rivers, bridges, highways).
-//
-// RETURNS:
-//   { orderedStops, routePositions, distance }
-// ───────────────────────────────────────────────────────────────────────────
-export async function getOptimizedTrip(depot, stops) {
-    if (!depot || stops.length === 0) {
-        return { orderedStops: [], routePositions: [], distance: 0 };
+function fallbackStraightLineRoute(waypoints) {
+    let totalDist = 0;
+    for (let i = 0; i < waypoints.length - 1; i++) {
+        totalDist += calculateDistance(waypoints[i], waypoints[i + 1]);
     }
-
-    try {
-        // 1. Array of all coordinates. Depot MUST be index 0.
-        const allPoints = [depot, ...stops.map(s => s.position)];
-
-        // Format: lng,lat;lng,lat...
-        const coordsString = allPoints
-            .map(point => `${point[1]},${point[0]}`)
-            .join(";");
-
-        // 2. Build the Trip API URL
-        // source=first -> Make the Depot the fixed start/end point.
-        // roundtrip=true -> Return back to the depot at the end.
-        const url = `https://router.project-osrm.org/trip/v1/driving/${coordsString}?source=first&roundtrip=true&overview=full&geometries=geojson`;
-
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`OSRM Trip API error: ${response.status}`);
-        
-        const data = await response.json();
-        
-        if (data.code !== "Ok" || !data.trips || data.trips.length === 0) {
-            console.warn("No trip found by OSRM");
-            return { orderedStops: stops, routePositions: [], distance: 0 };
-        }
-
-        const trip = data.trips[0];
-        const waypoints = data.waypoints;
-
-        // 3. Sort our React stops based on OSRM's optimal road-based order.
-        // The waypoints array maps 1-to-1 with our input `allPoints`.
-        // waypoints[0] is the depot. waypoints[1] is stops[0], etc.
-        // Each waypoint has a `waypoint_index` telling us its place in the final route.
-        const mappedStops = stops.map((stop, index) => {
-            const osrmWaypointData = waypoints[index + 1]; // +1 to skip the depot
-            return {
-                stop: stop,
-                optimalIndex: osrmWaypointData.waypoint_index
-            };
-        });
-
-        // Sort ascending based on the optimal index from OSRM
-        mappedStops.sort((a, b) => a.optimalIndex - b.optimalIndex);
-        
-        // Extract just the stop objects in their new correct order
-        const orderedStops = mappedStops.map(m => m.stop);
-
-        // 4. Extract road geometry and distance
-        const geoJsonCoords = trip.geometry.coordinates; 
-        const leafletCoords = geoJsonCoords.map(coord => [coord[1], coord[0]]);
-        const distanceKm = trip.distance / 1000;
-
-        return {
-            orderedStops,
-            routePositions: leafletCoords,
-            distance: Math.round(distanceKm * 100) / 100
-        };
-
-    } catch (error) {
-        console.error("Error fetching optimized trip:", error);
-        return { orderedStops: stops, routePositions: [], distance: 0 };
-    }
+    return {
+        routePositions: waypoints,
+        distance: Math.round(totalDist * 100) / 100,
+        duration: Math.round(totalDist * 2 * 10) / 10,
+        source: "haversine_fallback"
+    };
 }
+
+export default {
+    fetchDistanceMatrix,
+    getDrivingRoute
+};

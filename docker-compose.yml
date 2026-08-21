@@ -1,0 +1,58 @@
+version: "3.8"
+
+services:
+  # 1. PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: routeiq-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: routeiq_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./server/src/db/schema.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d routeiq_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. Node.js API & WebSocket Server
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: routeiq-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: 4000
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:postgrespassword@postgres:5432/routeiq_db
+      JWT_SECRET: routeiq_production_secure_secret_2026
+      JWT_EXPIRES_IN: 7d
+      CORS_ORIGIN: http://localhost:5173,http://127.0.0.1:5173,http://localhost:80
+      OSRM_BASE_URL: https://router.project-osrm.org
+    ports:
+      - "4000:4000"
+
+  # 3. React Frontend Client
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: routeiq-client
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+
+volumes:
+  pgdata:

@@ -7,8 +7,7 @@ import RouteSummary from "../components/RouteSummary";
 import AlgorithmBenchmark from "../components/AlgorithmBenchmark";
 import AlgorithmVisualizer from "../components/AlgorithmVisualizer";
 import ManifestModal from "../components/ManifestModal";
-import { optimizeRouteWithBenchmark } from "../utils/optimizeRoute";
-import { getDrivingRoute } from "../services/osrm";
+import { optimizeRouteWithRoadNetwork, optimizeRouteWithBenchmark } from "../utils/optimizeRoute";
 import { socket } from "../services/socket";
 import { publishRoute } from "../services/api";
 import { checkRouteDeviation } from "../utils/deviation";
@@ -249,7 +248,7 @@ function Dispatcher() {
         setSelectedPosition(null);
     }
 
-    // ── handleOptimize (Original NN + 2-Opt with Road Polyline) ───────────
+    // ── executeOptimization (Matrix-Driven Road Network NN + 2-Opt) ─────────
     const executeOptimization = useCallback(async (stopsToOptimize, startPoint) => {
         if (!startPoint || stopsToOptimize.length === 0) return;
 
@@ -258,30 +257,27 @@ function Dispatcher() {
         setVisualizerRoutePositions(null);
         
         try {
-            const benchmark = optimizeRouteWithBenchmark(stopsToOptimize, startPoint);
+            const roadResult = await optimizeRouteWithRoadNetwork(stopsToOptimize, startPoint);
             
-            setBenchmarkData(benchmark);
-            setOptimizedStops(benchmark.finalRoute);
-
-            const returnDepot = depot || startPoint;
-            const orderedWaypoints = [startPoint, ...benchmark.finalRoute.map(s => s.position), returnDepot];
-            const { routePositions, distance } = await getDrivingRoute(orderedWaypoints);
-            
-            if (routePositions.length > 0) {
-                setOsrmRoute(routePositions);
-                setOsrmDistance(distance || benchmark.twoOptDistance);
-            } else {
-                setOsrmRoute(orderedWaypoints);
-                setOsrmDistance(benchmark.twoOptDistance);
-            }
+            setBenchmarkData(roadResult.benchmark);
+            setOptimizedStops(roadResult.orderedStops);
+            setOsrmRoute(roadResult.routePositions);
+            setOsrmDistance(roadResult.distance);
             
             setHasOptimized(true);
             setIsPublished(false);
             setDeviationState({ isDeviated: false, distanceMeters: 0 });
             
         } catch(err) {
-            alert("Optimization failed. Please try again.");
-            console.error(err);
+            console.warn("Road network optimization fallback to synchronous solver:", err);
+            const benchmark = optimizeRouteWithBenchmark(stopsToOptimize, startPoint);
+            setBenchmarkData(benchmark);
+            setOptimizedStops(benchmark.finalRoute);
+            const returnDepot = depot || startPoint;
+            const orderedWaypoints = [startPoint, ...benchmark.finalRoute.map(s => s.position), returnDepot];
+            setOsrmRoute(orderedWaypoints);
+            setOsrmDistance(benchmark.twoOptDistance);
+            setHasOptimized(true);
         } finally {
             setIsOptimizing(false);
         }

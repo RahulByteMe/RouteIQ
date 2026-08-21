@@ -3,7 +3,7 @@ import { Server } from "socket.io";
 import { PORT, CORS_CONFIG } from "./src/config/constants.js";
 import { createApp } from "./src/app.js";
 import { registerSocketHandlers } from "./src/sockets/socketHandler.js";
-import { initDb } from "./src/db/connection.js";
+import { initDb, getPool } from "./src/db/connection.js";
 
 // ─── Server Bootstrap ──────────────────────────────────────────────────────
 //
@@ -31,5 +31,32 @@ async function startServer() {
 }
 
 startServer();
+
+// Graceful Shutdown Handler
+function gracefulShutdown(signal) {
+    console.log(`\n🛑 Received ${signal}. Shutting down RouteIQ server gracefully...`);
+    io.close(() => {
+        console.log("🔌 Closed all WebSocket connections.");
+    });
+
+    server.close(async () => {
+        console.log("HTTP server closed.");
+        const pool = getPool();
+        if (pool) {
+            await pool.end();
+            console.log("🐘 Closed PostgreSQL connection pool.");
+        }
+        process.exit(0);
+    });
+
+    // Force exit if shutdown hangs beyond 5s
+    setTimeout(() => {
+        console.error("⚠️ Forcefully terminating after timeout.");
+        process.exit(1);
+    }, 5000);
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
 export { server, io };
