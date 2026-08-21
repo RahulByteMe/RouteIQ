@@ -613,7 +613,7 @@ function Dispatcher() {
                                 title="Toggle Benchmark Audit Widget"
                             >
                                 <span>📊</span>
-                                <span>Benchmark (-{benchmarkData.savingsPercent}%)</span>
+                                <span>Benchmark ({benchmarkData.savingsPercent}% saved)</span>
                             </button>
                         )}
 
@@ -694,7 +694,7 @@ function Dispatcher() {
                         id="algorithm-benchmark"
                         title="Algorithm Benchmark"
                         icon="⚡"
-                        badge={`-${benchmarkData.savingsPercent}% km`}
+                        badge={`${benchmarkData.savingsPercent}% saved`}
                         defaultPosition={{ x: Math.max(20, window.innerWidth - 370), y: 70 }}
                         isOpen={showBenchmarkWidget}
                         onClose={() => setShowBenchmarkWidget(false)}

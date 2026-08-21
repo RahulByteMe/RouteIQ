@@ -68,7 +68,7 @@ function AlgorithmBenchmark({ benchmarkData, onOpenVisualizer }) {
                             <span>3. 2-Opt Untangled</span>
                             <span className="text-[10px] text-blue-400">O(N³)</span>
                         </span>
-                        <span className="text-emerald-400 font-bold">{twoOptDistance} km (-{savingsPercent}%)</span>
+                        <span className="text-emerald-400 font-bold">{twoOptDistance} km ({savingsPercent}% saved)</span>
                     </div>
                     <div className="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
                         <div
@@ -88,7 +88,7 @@ function AlgorithmBenchmark({ benchmarkData, onOpenVisualizer }) {
                             <span>🌱</span>
                             <span>ESG Eco-Savings:</span>
                         </span>
-                        <span className="font-mono font-bold">-{benchmarkData.kmSaved} km cut</span>
+                        <span className="font-mono font-bold">{benchmarkData.kmSaved} km saved</span>
                     </div>
                     <div className="grid grid-cols-2 gap-2 text-[10px] text-gray-300 font-mono">
                         <div>

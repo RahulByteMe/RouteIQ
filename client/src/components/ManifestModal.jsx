@@ -98,7 +98,7 @@ function ManifestModal({
                     )}
                     {benchmarkData?.savingsPercent > 0 && (
                         <div className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono font-semibold">
-                            🌱 -{benchmarkData.savingsPercent}% Distance Saved (~{benchmarkData.co2SavedKg}kg CO₂)
+                            🌱 {benchmarkData.savingsPercent}% Distance Saved (~{benchmarkData.co2SavedKg}kg CO₂)
                         </div>
                     )}
                 </div>

@@ -173,7 +173,7 @@ function Home() {
                                                 <td className="p-3 text-rose-400">{row.naiveDistanceKm} km</td>
                                                 <td className="p-3 text-amber-400">{row.nnDistanceKm} km</td>
                                                 <td className="p-3 text-emerald-400 font-bold">{row.twoOptDistanceKm} km</td>
-                                                <td className="p-3 font-bold text-emerald-300">-{row.savingsPercent}%</td>
+                                                <td className="p-3 font-bold text-emerald-300">+{row.savingsPercent}%</td>
                                                 <td className="p-3 text-gray-400 font-mono">{row.nnExecutionTimeMs} ms</td>
                                                 <td className="p-3 text-gray-400 font-mono">{row.twoOptExecutionTimeMs} ms</td>
                                                 <td className="p-3 font-bold text-blue-300 font-mono">{row.executionTimeMs} ms</td>
