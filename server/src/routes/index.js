@@ -23,4 +23,4 @@ apiRouter.use("/depot", depotRoutes);
 apiRouter.use("/routes", routesRoutes);
 apiRouter.use("/driver", telemetryRoutes);
 
-export default apiRouter;
+export default apiRouter; 

@@ -25,22 +25,29 @@
 
 ## 📊 Benchmark & Empirical Performance Results
 
-RouteIQ was benchmarked across deterministic datasets (5, 10, 20, 30, 50 stops) averaged over 100 iterations using `perf_hooks.performance.now()` via `npm run benchmark`:
+Across **50 deterministic datasets** (10 seeds × 5 stop counts), RouteIQ's self-implemented Nearest-Neighbor + 2-Opt heuristic achieved:
+
+- **21.1% – 75.2%** average distance reduction depending on stop count
+- **4.5%** minimum observed reduction
+- **77.9%** maximum observed reduction
+- **28.49 ms** average optimization time for 50-stop datasets
+- **All tested configurations** remained well below the 2-second PRD latency target
 
 ```
-=================================================================================================
-🚀 ROUTEIQ ALGORITHM EMPIRICAL BENCHMARK (Multi-Iteration Average: 100 runs)
-=================================================================================================
-Stops | Naive (km) | NN (km) | 2-Opt (km) | Reduction % | NN Time (ms) | 2-Opt Time (ms) | Total (ms) | Swaps | PRD Valid
--------------------------------------------------------------------------------------------------
-5     | 37.40      | 40.49   | 31.35      | -16.2%      | 0.004        | 0.031           | 0.035      | 5     | ✅ PASS
-10    | 65.49      | 52.05   | 42.22      | -35.5%      | 0.005        | 0.062           | 0.067      | 8     | ✅ PASS
-20    | 139.28     | 83.11   | 60.83      | -56.3%      | 0.010        | 0.646           | 0.656      | 18    | ✅ PASS
-30    | 211.63     | 84.41   | 60.38      | -71.5%      | 0.020        | 4.141           | 4.161      | 18    | ✅ PASS
-50    | 369.56     | 130.64  | 88.90      | -75.9%      | 0.056        | 14.276          | 14.332     | 33    | ✅ PASS
-=================================================================================================
-Formula: distanceReduction = ((naiveDistance - twoOptDistance) / naiveDistance) * 100
-Command: npm run benchmark (in server/ directory)
+========================================================================================================================
+📊 AGGREGATE PERFORMANCE SUMMARY (Averaged across 10 Datasets × 100 Timing Iterations per Stop Count)
+========================================================================================================================
+Stops | Avg Naive | Avg NN    | Avg 2-Opt  | Avg Reduc % | Min Reduc % | Max Reduc % | Avg NN (ms) | Avg 2-Opt (ms) | Total (ms) | PRD Valid
+------------------------------------------------------------------------------------------------------------------------
+5     | 44.80 km  | 38.32 km  | 35.26 km   | +21.1%      | +4.5%       | +28.3%      | 0.002       | 0.005          | 0.006      | ✅ PASS
+10    | 90.52 km  | 58.99 km  | 47.97 km   | +46.1%      | +33.5%      | +58.8%      | 0.003       | 0.055          | 0.057      | ✅ PASS
+20    | 178.67 km | 98.79 km  | 70.18 km   | +60.6%      | +55.8%      | +66.1%      | 0.009       | 0.803          | 0.812      | ✅ PASS
+30    | 267.92 km | 112.56 km | 81.96 km   | +69.1%      | +63.7%      | +72.5%      | 0.019       | 3.506          | 3.525      | ✅ PASS
+50    | 422.38 km | 153.05 km | 103.98 km  | +75.2%      | +70.4%      | +77.9%      | 0.060       | 28.427         | 28.488     | ✅ PASS
+========================================================================================================================
+• Distance Reduction Formula: ((naiveDistance - twoOptDistance) / naiveDistance) * 100 [Positive = distance reduced]
+• Time Measurement         : Node.js perf_hooks.performance.now() averaged across 100 timing runs per dataset
+• Reproducibility          : Seeded Mulberry32 PRNG (Seeds 1001-1010) guarantees identical coordinates across runs
 ```
 
 | Metric | PRD Target | RouteIQ Measured (50 Stops) | Result |
