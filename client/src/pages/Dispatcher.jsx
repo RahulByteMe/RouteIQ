@@ -7,6 +7,7 @@ import RouteSummary from "../components/RouteSummary";
 import AlgorithmBenchmark from "../components/AlgorithmBenchmark";
 import AlgorithmVisualizer from "../components/AlgorithmVisualizer";
 import ManifestModal from "../components/ManifestModal";
+import DraggableWidget from "../components/DraggableWidget";
 import { optimizeRouteWithRoadNetwork, optimizeRouteWithBenchmark } from "../utils/optimizeRoute";
 import { socket } from "../services/socket";
 import {
@@ -21,18 +22,7 @@ import {
 import { checkRouteDeviation } from "../utils/deviation";
 import { CITY_PRESETS } from "../data/cityPresets";
 
-// ─── Dispatcher Page (India-Only Logistics Hub & DB Connected) ──────────────
-//
-// WHO USES THIS:
-//   The dispatcher planning delivery logistics across Indian metropolitan networks.
-//
-// FEATURES:
-//   1. 100% Backend Database Storage (PostgreSQL / REST API).
-//   2. Curated Indian Metropolitan Presets (Delhi NCR, Bengaluru, Mumbai, etc.).
-//   3. OSRM Road-Network Matrix-Aware 2-Opt Optimization.
-//   4. Real-time WebSocket Driver Tracking & Automated Deviation Re-Routing.
-//   5. Delivery Manifest Exporter (CSV, Print, Copy).
-// ───────────────────────────────────────────────────────────────────────────
+// ─── Dispatcher Page (India Logistics Hub with Draggable Overlays) ───────────
 
 function Dispatcher() {
     const navigate = useNavigate();
@@ -53,6 +43,11 @@ function Dispatcher() {
     const [editingId, setEditingId] = useState(null);
     const [selectedPosition, setSelectedPosition] = useState(null);
     const [mobileTab, setMobileTab] = useState("panel"); // "panel" | "map"
+
+    // ── Floating HUD Overlays Management ──────────────────────────────────
+    const [showSummaryWidget, setShowSummaryWidget] = useState(true);
+    const [showBenchmarkWidget, setShowBenchmarkWidget] = useState(true);
+    const [showAllOverlays, setShowAllOverlays] = useState(true);
 
     // ── Optimization & Algorithm state ───────────────────────────────────
     const [optimizedStops, setOptimizedStops] = useState([]);
@@ -84,22 +79,21 @@ function Dispatcher() {
         async function loadInitialData() {
             try {
                 const [dbStops, dbDepot] = await Promise.all([fetchStops(), fetchDepot()]);
-                if (dbStops && dbStops.length > 0) {
+                if (dbStops && Array.isArray(dbStops) && dbStops.length > 0) {
                     setStops(dbStops);
                 } else {
-                    // Seed initial Delhi NCR preset to database
-                    await saveBatchStops(CITY_PRESETS[0].stops);
                     setStops(CITY_PRESETS[0].stops);
                 }
 
-                if (dbDepot) {
+                if (dbDepot && Array.isArray(dbDepot) && dbDepot.length === 2) {
                     setDepot(dbDepot);
                 } else {
-                    await saveDepot(CITY_PRESETS[0].depot);
                     setDepot(CITY_PRESETS[0].depot);
                 }
             } catch (err) {
                 console.warn("Could not load stops/depot from backend database:", err);
+                setStops(CITY_PRESETS[0].stops);
+                setDepot(CITY_PRESETS[0].depot);
             }
         }
 
@@ -163,7 +157,6 @@ function Dispatcher() {
             setDepot(preset.depot);
             setStops(preset.stops);
             resetRoute();
-            // Sync with backend Database
             await Promise.all([
                 saveDepot(preset.depot),
                 saveBatchStops(preset.stops)
@@ -285,6 +278,8 @@ function Dispatcher() {
             
             setHasOptimized(true);
             setIsPublished(false);
+            setShowSummaryWidget(true);
+            setShowBenchmarkWidget(true);
             setDeviationState({ isDeviated: false, distanceMeters: 0 });
             
         } catch(err) {
@@ -297,6 +292,8 @@ function Dispatcher() {
             setOsrmRoute(orderedWaypoints);
             setOsrmDistance(benchmark.twoOptDistance);
             setHasOptimized(true);
+            setShowSummaryWidget(true);
+            setShowBenchmarkWidget(true);
         } finally {
             setIsOptimizing(false);
         }
@@ -586,9 +583,72 @@ function Dispatcher() {
                 mobileTab === "panel" ? "hidden md:flex" : "flex"
             }`}>
 
+                {/* ── TOP FLOATING MAP HUD TOOLBAR ── */}
+                {hasOptimized && (
+                    <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[1000] bg-gray-900/90 border border-gray-700/80 rounded-full px-3 py-1.5 shadow-2xl backdrop-blur-md flex items-center gap-2 text-xs">
+                        
+                        {/* Route Summary Toggle Pill */}
+                        <button
+                            onClick={() => setShowSummaryWidget(!showSummaryWidget)}
+                            className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                                showSummaryWidget
+                                    ? "bg-blue-600 text-white shadow-sm"
+                                    : "bg-gray-800 text-gray-400 hover:text-gray-200"
+                            }`}
+                            title="Toggle Route Summary Widget"
+                        >
+                            <span>📋</span>
+                            <span>Summary ({osrmDistance ? `${osrmDistance.toFixed(1)} km` : "Ready"})</span>
+                        </button>
+
+                        {/* Benchmark Toggle Pill */}
+                        {benchmarkData && (
+                            <button
+                                onClick={() => setShowBenchmarkWidget(!showBenchmarkWidget)}
+                                className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                                    showBenchmarkWidget
+                                        ? "bg-emerald-600 text-white shadow-sm"
+                                        : "bg-gray-800 text-gray-400 hover:text-gray-200"
+                                }`}
+                                title="Toggle Benchmark Audit Widget"
+                            >
+                                <span>📊</span>
+                                <span>Benchmark (-{benchmarkData.savingsPercent}%)</span>
+                            </button>
+                        )}
+
+                        {/* Step Visualizer Toggle Pill */}
+                        {benchmarkData?.steps?.length > 1 && (
+                            <button
+                                onClick={() => setIsVisualizerOpen(!isVisualizerOpen)}
+                                className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                                    isVisualizerOpen
+                                        ? "bg-indigo-600 text-white shadow-sm"
+                                        : "bg-gray-800 text-gray-400 hover:text-gray-200"
+                                }`}
+                                title="Toggle Step Visualizer"
+                            >
+                                <span>🔬</span>
+                                <span>Visualizer</span>
+                            </button>
+                        )}
+
+                        <div className="h-4 w-px bg-gray-700 mx-0.5"></div>
+
+                        {/* Master Show/Hide Toggle */}
+                        <button
+                            onClick={() => setShowAllOverlays(!showAllOverlays)}
+                            className="text-gray-400 hover:text-white text-[11px] font-semibold flex items-center gap-1 px-2 py-1 rounded-full hover:bg-gray-800 transition-colors cursor-pointer"
+                            title={showAllOverlays ? "Hide All Floating Cards" : "Show All Floating Cards"}
+                        >
+                            <span>{showAllOverlays ? "👁️ Hide HUD" : "👁️ Show HUD"}</span>
+                        </button>
+                    </div>
+                )}
+
                 {/* Live Deviation Alert Banner */}
                 {deviationState.isDeviated && (
-                    <div className="absolute top-4 left-4 right-4 z-[1000] bg-rose-950/95 border border-rose-600 rounded-xl p-3.5 shadow-2xl backdrop-blur-md flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-white animate-bounce">
+                    <div className="absolute top-16 left-4 right-4 z-[1000] bg-rose-950/95 border border-rose-600 rounded-xl p-3.5 shadow-2xl backdrop-blur-md flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-white animate-bounce">
                         <div className="flex items-center gap-2.5">
                             <span className="text-xl">⚠️</span>
                             <div>
@@ -608,21 +668,39 @@ function Dispatcher() {
                     </div>
                 )}
 
-                {/* Top Overlay Bar: Route Stats */}
-                <div className="absolute top-4 left-4 z-[999] pointer-events-none hidden sm:block">
-                    <RouteSummary
-                        stops={hasOptimized ? optimizedStops : stops}
-                        depot={depot}
-                        hasOptimized={hasOptimized}
-                        osrmDistance={osrmDistance}
-                    />
-                </div>
+                {/* ── DRAGGABLE ROUTE SUMMARY WIDGET ── */}
+                {hasOptimized && showAllOverlays && (
+                    <DraggableWidget
+                        id="route-summary"
+                        title="Route Summary"
+                        icon="📋"
+                        badge={osrmDistance ? `${osrmDistance.toFixed(1)} km` : "Ready"}
+                        defaultPosition={{ x: window.innerWidth > 900 ? 410 : 20, y: 70 }}
+                        isOpen={showSummaryWidget}
+                        onClose={() => setShowSummaryWidget(false)}
+                    >
+                        <RouteSummary
+                            stops={hasOptimized ? optimizedStops : stops}
+                            depot={depot}
+                            hasOptimized={hasOptimized}
+                            osrmDistance={osrmDistance}
+                        />
+                    </DraggableWidget>
+                )}
 
-                {/* Top Overlay Bar: Algorithm Comparative Audit */}
-                {hasOptimized && benchmarkData && (
-                    <div className="absolute top-4 right-4 z-[999] pointer-events-none max-w-sm hidden lg:block">
+                {/* ── DRAGGABLE ALGORITHM BENCHMARK WIDGET ── */}
+                {hasOptimized && benchmarkData && showAllOverlays && (
+                    <DraggableWidget
+                        id="algorithm-benchmark"
+                        title="Algorithm Benchmark"
+                        icon="⚡"
+                        badge={`-${benchmarkData.savingsPercent}% km`}
+                        defaultPosition={{ x: Math.max(20, window.innerWidth - 370), y: 70 }}
+                        isOpen={showBenchmarkWidget}
+                        onClose={() => setShowBenchmarkWidget(false)}
+                    >
                         <AlgorithmBenchmark benchmarkData={benchmarkData} />
-                    </div>
+                    </DraggableWidget>
                 )}
 
                 {/* Bottom Overlay: Driver Live Status Pill */}
@@ -662,7 +740,7 @@ function Dispatcher() {
 
             </main>
 
-            {/* ── ALGORITHM STEP VISUALIZER MODAL ───────────────────────── */}
+            {/* ── DRAGGABLE ALGORITHM STEP VISUALIZER MODAL ───────────────── */}
             <AlgorithmVisualizer
                 isOpen={isVisualizerOpen}
                 onClose={handleCloseVisualizer}

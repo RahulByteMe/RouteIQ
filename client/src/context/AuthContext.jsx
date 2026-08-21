@@ -19,36 +19,56 @@ export function AuthProvider({ children }) {
         localStorage.removeItem("routeiq_user");
     }, []);
 
-    // Verify token with backend /api/auth/me on initial mount
+    // ── Auto-Initialize or Verify Session ──────────────────────────────────
     useEffect(() => {
-        async function verifyUser() {
-            if (!token) {
-                setIsLoading(false);
-                return;
+        async function initAuth() {
+            // If already have token, verify it with backend
+            if (token) {
+                try {
+                    const res = await fetch(`${API_BASE}/auth/me`, {
+                        headers: { Authorization: `Bearer ${token}` }
+                    });
+
+                    if (res.ok) {
+                        const data = await res.json();
+                        setUser(data.user);
+                        localStorage.setItem("routeiq_user", JSON.stringify(data.user));
+                        setIsLoading(false);
+                        return;
+                    }
+                } catch (err) {
+                    console.warn("Auth check network fallback:", err);
+                    setIsLoading(false);
+                    return;
+                }
             }
 
+            // If no token, auto-seed a demo dispatcher session for instant access
             try {
-                const res = await fetch(`${API_BASE}/auth/me`, {
-                    headers: {
-                        Authorization: `Bearer ${token}`
-                    }
+                const res = await fetch(`${API_BASE}/auth/login`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        email: "dispatcher@routeiq.com",
+                        password: "password123"
+                    })
                 });
 
                 if (res.ok) {
                     const data = await res.json();
+                    setToken(data.token);
                     setUser(data.user);
+                    localStorage.setItem("routeiq_token", data.token);
                     localStorage.setItem("routeiq_user", JSON.stringify(data.user));
-                } else {
-                    logout();
                 }
             } catch (err) {
-                console.warn("Auth verification network error, keeping cached state:", err);
+                console.warn("Auto-demo login fallback:", err);
             } finally {
                 setIsLoading(false);
             }
         }
 
-        verifyUser();
+        initAuth();
     }, [token, logout]);
 
     const login = async (email, password) => {

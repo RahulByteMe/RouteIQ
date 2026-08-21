@@ -1,104 +1,62 @@
-// ─── RouteSummary ───────────────────────────────────────────────────────────
+// ─── RouteSummary Component ────────────────────────────────────────────────
 //
-// WHAT IS THIS?
-//   A "presentational component" — it has no state, no side effects.
-//   It receives data through props and simply displays it.
-//   This makes it easy to understand, test, and reuse.
-//
-// PROPS:
-//   depot          → [lat, lng] of the depot
-//   optimizedStops → array of stop objects in optimized visit order
-//   totalDistance  → number (km), already calculated by routeDistance.js
+// WHAT IT DOES:
+//   Displays the active sequenced route overview, depot coordinates, total
+//   distance (km), and stop-by-stop itinerary.
 // ───────────────────────────────────────────────────────────────────────────
 
-function RouteSummary({ depot, optimizedStops, totalDistance }) {
+function RouteSummary({
+    depot = null,
+    stops = [],
+    optimizedStops = null,
+    totalDistance = 0,
+    osrmDistance = 0,
+    hasOptimized = false
+}) {
+    const displayStops = optimizedStops || stops || [];
+    const distanceKm = Number(totalDistance || osrmDistance || 0);
 
-    // Don't render anything if there's no route to show
-    if (!depot || optimizedStops.length === 0) {
+    if (!depot || displayStops.length === 0 || !hasOptimized) {
         return null;
     }
 
     return (
-        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-
-            {/* Header */}
-            <div className="bg-blue-600 px-4 py-3">
-                <h3 className="text-white font-semibold text-sm tracking-wide uppercase">
-                    Route Summary
-                </h3>
+        <div className="space-y-3 text-xs">
+            {/* Quick Stats Grid */}
+            <div className="grid grid-cols-2 gap-2 text-[11px]">
+                <div className="bg-gray-950/70 p-2.5 rounded-xl border border-gray-800/80">
+                    <span className="text-gray-400 block text-[10px]">Hub Depot</span>
+                    <span className="font-mono text-emerald-400 font-semibold truncate block">
+                        {depot[0].toFixed(3)}, {depot[1].toFixed(3)}
+                    </span>
+                </div>
+                <div className="bg-gray-950/70 p-2.5 rounded-xl border border-gray-800/80">
+                    <span className="text-gray-400 block text-[10px]">Total Distance</span>
+                    <span className="font-mono text-blue-400 font-bold block">
+                        {distanceKm.toFixed(2)} km
+                    </span>
+                </div>
             </div>
 
-            <div className="p-4 space-y-4">
-
-                {/* Start */}
-                <div>
-                    <p className="text-xs text-gray-500 uppercase font-semibold mb-1">
-                        Start
-                    </p>
-                    <div className="flex items-center gap-2">
-                        <span className="text-lg">🏭</span>
-                        <div>
-                            <p className="text-sm font-medium text-gray-800">Depot</p>
-                            <p className="text-xs text-gray-400">
-                                {depot[0].toFixed(4)}, {depot[1].toFixed(4)}
-                            </p>
-                        </div>
-                    </div>
+            {/* Sequence preview (stops itinerary) */}
+            <div className="space-y-1.5 pt-1">
+                <div className="flex justify-between items-center text-[10px] text-gray-400 font-semibold uppercase tracking-wider">
+                    <span>Sequenced Itinerary:</span>
+                    <span className="text-gray-500 font-mono">{displayStops.length} stops</span>
                 </div>
-
-                {/* Divider */}
-                <hr className="border-gray-100" />
-
-                {/* Stops */}
-                <div>
-                    <p className="text-xs text-gray-500 uppercase font-semibold mb-2">
-                        Stops ({optimizedStops.length})
-                    </p>
-                    <ol className="space-y-2">
-                        {optimizedStops.map((stop, index) => (
-                            <li key={stop.id} className="flex items-start gap-2">
-                                {/* Step number badge */}
-                                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-xs font-bold flex items-center justify-center mt-0.5">
-                                    {index + 1}
-                                </span>
-                                <div>
-                                    <p className="text-sm font-medium text-gray-800">
-                                        {stop.name}
-                                    </p>
-                                    <p className="text-xs text-gray-400">
-                                        {stop.position[0].toFixed(4)}, {stop.position[1].toFixed(4)}
-                                    </p>
-                                </div>
-                            </li>
-                        ))}
-                    </ol>
-                </div>
-
-                {/* Return to depot */}
-                <div className="flex items-center gap-2">
-                    <span className="text-lg">🏭</span>
-                    <p className="text-sm text-gray-500 italic">Return to Depot</p>
-                </div>
-
-                {/* Divider */}
-                <hr className="border-gray-100" />
-
-                {/* Totals */}
-                <div className="space-y-2">
-                    <div className="flex justify-between items-center">
-                        <span className="text-sm text-gray-600">Total Distance</span>
-                        <span className="text-sm font-bold text-blue-600">
-                            {totalDistance.toFixed(2)} km
-                        </span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                        <span className="text-sm text-gray-600">Number of Stops</span>
-                        <span className="text-sm font-bold text-gray-800">
-                            {optimizedStops.length}
-                        </span>
-                    </div>
-                </div>
-
+                <ol className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                    {displayStops.map((stop, idx) => (
+                        <li key={stop.id || idx} className="flex items-center gap-2 text-[11px] text-gray-300 bg-gray-950/40 p-1.5 rounded-lg border border-gray-800/40">
+                            <span className="w-4 h-4 rounded-full bg-blue-600/40 text-blue-300 font-mono text-[9px] font-bold flex items-center justify-center flex-shrink-0">
+                                {idx + 1}
+                            </span>
+                            <span className="truncate flex-1">{stop.name}</span>
+                            {stop.priority === "urgent" && (
+                                <span className="text-[9px] text-red-400 font-bold">⚡</span>
+                            )}
+                        </li>
+                    ))}
+                </ol>
             </div>
         </div>
     );
