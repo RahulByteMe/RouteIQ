@@ -1,8 +1,8 @@
-// ─── RouteIQ REST API Client ───────────────────────────────────────────────
+// ─── RouteIQ REST API Client (Backend Database Connection) ──────────────────
 //
 // WHAT IT DOES:
-//   Connects to the RouteIQ backend API (http://127.0.0.1:4000) with JWT bearer
-//   token attachment and graceful fallback to localStorage.
+//   Connects directly to the RouteIQ backend API and PostgreSQL database
+//   with automatic JWT bearer token injection and error handling.
 // ───────────────────────────────────────────────────────────────────────────
 
 const API_BASE = "http://127.0.0.1:4000/api";
@@ -16,32 +16,103 @@ function getHeaders() {
     return headers;
 }
 
+// ─── Stops API ─────────────────────────────────────────────────────────────
 export async function fetchStops() {
     try {
         const res = await fetch(`${API_BASE}/stops`, {
             headers: getHeaders()
         });
-        if (res.ok) return await res.json();
-    } catch {
-        // Fallback to localStorage
+        if (res.ok) {
+            const data = await res.json();
+            return data;
+        }
+    } catch (err) {
+        console.warn("Error fetching stops from backend DB:", err);
     }
-    const saved = localStorage.getItem("dispatcher_stops");
-    return saved ? JSON.parse(saved) : [];
+    return [];
+}
+
+export async function createStop(stop) {
+    try {
+        const res = await fetch(`${API_BASE}/stops`, {
+            method: "POST",
+            headers: getHeaders(),
+            body: JSON.stringify(stop)
+        });
+        if (res.ok) {
+            return await res.json();
+        }
+    } catch (err) {
+        console.warn("Error creating stop on backend DB:", err);
+    }
+    return stop;
+}
+
+export async function deleteStop(stopId) {
+    try {
+        const res = await fetch(`${API_BASE}/stops/${stopId}`, {
+            method: "DELETE",
+            headers: getHeaders()
+        });
+        if (res.ok) {
+            return await res.json();
+        }
+    } catch (err) {
+        console.warn("Error deleting stop on backend DB:", err);
+    }
+    return { id: stopId };
+}
+
+export async function saveBatchStops(stops) {
+    try {
+        const res = await fetch(`${API_BASE}/stops/batch`, {
+            method: "POST",
+            headers: getHeaders(),
+            body: JSON.stringify({ stops })
+        });
+        if (res.ok) {
+            return await res.json();
+        }
+    } catch (err) {
+        console.warn("Error saving batch stops to backend DB:", err);
+    }
+    return stops;
+}
+
+// ─── Depot API ─────────────────────────────────────────────────────────────
+export async function fetchDepot() {
+    try {
+        const res = await fetch(`${API_BASE}/depot`, {
+            headers: getHeaders()
+        });
+        if (res.ok) {
+            const data = await res.json();
+            if (data && data.depot) return data.depot;
+        }
+    } catch (err) {
+        console.warn("Error fetching depot from backend DB:", err);
+    }
+    return [28.6139, 77.2090]; // Default New Delhi
 }
 
 export async function saveDepot(depot) {
     try {
-        await fetch(`${API_BASE}/depot`, {
+        const res = await fetch(`${API_BASE}/depot`, {
             method: "POST",
             headers: getHeaders(),
             body: JSON.stringify({ depot })
         });
-    } catch {
-        // Fallback to localStorage
+        if (res.ok) {
+            const data = await res.json();
+            return data.depot;
+        }
+    } catch (err) {
+        console.warn("Error saving depot to backend DB:", err);
     }
-    localStorage.setItem("dispatcher_depot", JSON.stringify(depot));
+    return depot;
 }
 
+// ─── Routes API ────────────────────────────────────────────────────────────
 export async function fetchPublishedRoute() {
     try {
         const res = await fetch(`${API_BASE}/routes/published`, {
@@ -51,16 +122,13 @@ export async function fetchPublishedRoute() {
             const data = await res.json();
             if (data && data.depot) return data;
         }
-    } catch {
-        // Fallback to localStorage
+    } catch (err) {
+        console.warn("Error fetching published route from backend DB:", err);
     }
-    const saved = localStorage.getItem("routeiq_published_route");
-    return saved ? JSON.parse(saved) : null;
+    return null;
 }
 
 export async function publishRoute(payload) {
-    localStorage.setItem("routeiq_published_route", JSON.stringify(payload));
-
     try {
         const res = await fetch(`${API_BASE}/routes/publish`, {
             method: "POST",
@@ -71,7 +139,18 @@ export async function publishRoute(payload) {
             return await res.json();
         }
     } catch (err) {
-        console.warn("Backend API sync failed, relying on local storage:", err);
+        console.warn("Backend API sync failed:", err);
     }
     return payload;
 }
+
+export default {
+    fetchStops,
+    createStop,
+    deleteStop,
+    saveBatchStops,
+    fetchDepot,
+    saveDepot,
+    fetchPublishedRoute,
+    publishRoute
+};

@@ -174,8 +174,8 @@ function MapView({
     driverHeading = 0,
     isDeviated = false,
 }) {
-    // Dynamic initial center computed from depot, first stop, or global default
-    const initialCenter = depot || (stops.length > 0 ? stops[0].position : [40.7580, -73.9855]);
+    // Dynamic initial center computed from depot, first stop, or New Delhi India default
+    const initialCenter = depot || (stops.length > 0 ? stops[0].position : [28.6139, 77.2090]);
 
     return (
         <MapContainer

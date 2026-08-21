@@ -17,11 +17,13 @@ export const CORS_CONFIG = {
     credentials: true
 };
 
-export const INITIAL_STOPS = [
-    { id: 101, name: "Central Park West", position: [40.7829, -73.9654], priority: "urgent" },
-    { id: 102, name: "Empire State Plaza", position: [40.7484, -73.9857], priority: "standard" },
-    { id: 103, name: "Grand Central Terminal", position: [40.7527, -73.9772], priority: "urgent" },
-    { id: 104, name: "Chelsea Market", position: [40.7420, -74.0048], priority: "standard" }
-];
+// Default Initial Hub & Stops: 🇮🇳 Delhi NCR Logistics Network
+export const INITIAL_DEPOT = [28.6139, 77.2090]; // Connaught Place Central Hub, New Delhi
 
-export const INITIAL_DEPOT = [40.7580, -73.9855]; // Manhattan Central Hub
+export const INITIAL_STOPS = [
+    { id: 401, name: "Karol Bagh Commercial Market", position: [28.6517, 77.1906], priority: "urgent" },
+    { id: 402, name: "Lajpat Nagar Central Market", position: [28.5677, 77.2433], priority: "standard" },
+    { id: 403, name: "Nehru Place IT Hub", position: [28.5494, 77.2527], priority: "urgent" },
+    { id: 404, name: "Cyber City DLF Phase 2", position: [28.4950, 77.0890], priority: "flexible" },
+    { id: 405, name: "Noida Sector 18 Commercial Hub", position: [28.5708, 77.3260], priority: "standard" }
+];

@@ -34,6 +34,20 @@ export const createStop = async (req, res) => {
     }
 };
 
+export const setBatchStops = async (req, res) => {
+    try {
+        const { stops } = req.body;
+        if (!stops || !Array.isArray(stops)) {
+            return res.status(400).json({ error: "Invalid stops payload. Must be an array of stops." });
+        }
+
+        const savedStops = await stopRepository.setBatch(stops, req.user?.id || null);
+        res.status(200).json(savedStops);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to save batch stops", details: err.message });
+    }
+};
+
 export const deleteStop = async (req, res) => {
     try {
         const stopId = Number(req.params.id);
@@ -47,5 +61,6 @@ export const deleteStop = async (req, res) => {
 export default {
     getStops,
     createStop,
+    setBatchStops,
     deleteStop
 };

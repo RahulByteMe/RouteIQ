@@ -1,33 +1,29 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import MapView from "../components/MapView";
 import { socket } from "../services/socket";
+import { fetchPublishedRoute } from "../services/api";
 import calculateDistance from "../utils/distance";
 
-// ─── Driver Page ─────────────────────────────────────────────────────────────
+// ─── Driver Page (Indian Logistics Route & DB Connected) ────────────────────
 //
 // WHO USES THIS:
-//   The delivery driver — the person on the road making deliveries.
+//   The delivery driver on the road executing the sequenced delivery tour.
 //
-// PORTFOLIO & REAL-TIME FEATURES:
-//   1. Sub-second GPS telemetry emission to dispatchers via WebSockets.
-//   2. Live Turn-by-Turn Next Stop Guidance & Direct Google Maps deep-link.
-//   3. Responsive Mobile View Mode (Map vs Checklist).
+// FEATURES:
+//   1. Pulls active published route directly from the backend Database.
+//   2. Sub-second GPS telemetry emission to dispatchers via WebSockets.
+//   3. Live Turn-by-Turn Next Stop Guidance & Direct Google Maps deep-link.
 //   4. 250m auto-arrival stop check-off with smooth interpolation.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function Driver() {
 
-    // ── Published Route State ─────────────────────────────────────────────
-    const [publishedRoute, setPublishedRoute] = useState(() => {
-        const saved = localStorage.getItem("routeiq_published_route");
-        return saved ? JSON.parse(saved) : null;
-    });
+    // ── Published Route State (Loaded from Backend Database) ───────────────
+    const [publishedRoute, setPublishedRoute] = useState(null);
+    const [isLoadingRoute, setIsLoadingRoute] = useState(true);
 
     // ── Driver Progress ───────────────────────────────────────────────────
-    const [completedIds, setCompletedIds] = useState(() => {
-        const saved = localStorage.getItem("routeiq_driver_progress");
-        return saved ? new Set(JSON.parse(saved)) : new Set();
-    });
+    const [completedIds, setCompletedIds] = useState(new Set());
 
     // ── Driver Progress Ref ──────────────────────────────────────────────
     const completedIdsRef = useRef(completedIds);
@@ -38,18 +34,7 @@ function Driver() {
     // ── Real-Time Telemetry & Simulation State ─────────────────────────────
     const [isSimulating, setIsSimulating] = useState(false);
     const [isLiveGps, setIsLiveGps] = useState(false);
-    const [driverPosition, setDriverPosition] = useState(() => {
-        const saved = localStorage.getItem("routeiq_published_route");
-        if (saved) {
-            try {
-                const parsed = JSON.parse(saved);
-                return parsed.depot || null;
-            } catch {
-                return null;
-            }
-        }
-        return null;
-    });
+    const [driverPosition, setDriverPosition] = useState(null);
     const [driverHeading, setDriverHeading] = useState(0);
     const [driverSpeed, setDriverSpeed] = useState(0);
     const [isDeviated, setIsDeviated] = useState(false);
@@ -59,14 +44,33 @@ function Driver() {
     const simulationTimerRef = useRef(null);
     const geoWatchIdRef = useRef(null);
 
-    // ── Listen for New Routes from Dispatcher via WebSockets ───────────────
+    // ── 1. Fetch Active Route from Backend DB on Mount ────────────────────
+    useEffect(() => {
+        async function loadActiveRoute() {
+            try {
+                const dbRoute = await fetchPublishedRoute();
+                if (dbRoute && dbRoute.stops) {
+                    setPublishedRoute(dbRoute);
+                    if (dbRoute.depot) {
+                        setDriverPosition(dbRoute.depot);
+                    }
+                }
+            } catch (err) {
+                console.warn("Could not fetch published route from DB:", err);
+            } finally {
+                setIsLoadingRoute(false);
+            }
+        }
+
+        loadActiveRoute();
+    }, []);
+
+    // ── 2. Listen for Real-Time Dispatch Broadcasts via WebSockets ────────
     useEffect(() => {
         function handleNewRoute(newRoute) {
             if (newRoute && newRoute.stops) {
                 setPublishedRoute(newRoute);
                 setCompletedIds(new Set());
-                localStorage.setItem("routeiq_published_route", JSON.stringify(newRoute));
-                localStorage.removeItem("routeiq_driver_progress");
                 if (newRoute.depot) {
                     setDriverPosition(newRoute.depot);
                 }
@@ -104,143 +108,178 @@ function Driver() {
                 newCompleted.delete(stopId);
             }
 
-            localStorage.setItem("routeiq_driver_progress", JSON.stringify([...newCompleted]));
-            // Broadcast to Dispatcher via WebSocket
-            socket.emit("driver:stop_completed", { stopId, isDone });
+            // Emit to dispatcher via WebSocket
+            socket.emit("driver:stop_completed", {
+                stopId,
+                isDone,
+                completedIds: Array.from(newCompleted)
+            });
+
             return newCompleted;
         });
     }, []);
 
-    // ── Clear Progress ────────────────────────────────────────────────────
-    function handleClearProgress() {
-        if (!window.confirm("Clear all delivery progress? This cannot be undone.")) {
-            return;
-        }
-        setCompletedIds(new Set());
-        localStorage.removeItem("routeiq_driver_progress");
-        if (publishedRoute?.depot) {
-            broadcastTelemetry(publishedRoute.depot, 0, 0, false);
-        }
-    }
+    // ── Auto-Arrival Proximity Detection (PRD Section 4: 250m Radius) ───────
+    const checkAutoArrival = useCallback((currentPos) => {
+        if (!publishedRoute?.stops || !currentPos) return;
 
-    // ── Route Drive Simulation ────────────────────────────────────────────
-    useEffect(() => {
-        if (!isSimulating || !publishedRoute) {
-            if (simulationTimerRef.current) clearInterval(simulationTimerRef.current);
-            return;
-        }
+        const ARRIVAL_RADIUS_KM = 0.25; // 250 meters
 
-        const path = publishedRoute.osrmRoute && publishedRoute.osrmRoute.length > 0
-            ? publishedRoute.osrmRoute
-            : [publishedRoute.depot, ...publishedRoute.stops.map(s => s.position), publishedRoute.depot];
-
-        socket.emit("driver:status_toggle", { isLive: false, isSimulating: true });
-
-        simulationTimerRef.current = setInterval(() => {
-            simulationIndexRef.current = (simulationIndexRef.current + 1) % path.length;
-            const idx = simulationIndexRef.current;
-            const currentPos = path[idx];
-            const nextPos = path[(idx + 1) % path.length];
-
-            const dy = nextPos[0] - currentPos[0];
-            const dx = nextPos[1] - currentPos[1];
-            const headingDeg = Math.round((Math.atan2(dx, dy) * 180) / Math.PI);
-
-            broadcastTelemetry(currentPos, headingDeg, 45, false);
-
-            // Auto-complete stops when vehicle comes within delivery radius (250m)
-            publishedRoute.stops.forEach((stop) => {
-                const distToStop = calculateDistance(currentPos, stop.position);
-                if (distToStop <= 0.25 && !completedIdsRef.current.has(stop.id)) {
+        publishedRoute.stops.forEach((stop) => {
+            if (!completedIdsRef.current.has(stop.id)) {
+                const distKm = calculateDistance(currentPos, stop.position);
+                if (distKm <= ARRIVAL_RADIUS_KM) {
                     toggleStopDone(stop.id);
                 }
-            });
+            }
+        });
+    }, [publishedRoute, toggleStopDone]);
 
-        }, 350);
+    // ── Telemetry Helper: Heading & Speed ─────────────────────────────────
+    function computeHeading(prev, curr) {
+        if (!prev || !curr) return 0;
+        const dLon = curr[1] - prev[1];
+        const dLat = curr[0] - prev[0];
+        let deg = (Math.atan2(dLon, dLat) * 180) / Math.PI;
+        return deg >= 0 ? deg : deg + 360;
+    }
 
-        return () => {
-            if (simulationTimerRef.current) clearInterval(simulationTimerRef.current);
-        };
-    }, [isSimulating, publishedRoute, broadcastTelemetry, toggleStopDone]);
+    // ── Simulation Engine ─────────────────────────────────────────────────
+    const stopSimulation = useCallback(() => {
+        if (simulationTimerRef.current) {
+            clearInterval(simulationTimerRef.current);
+            simulationTimerRef.current = null;
+        }
+        setIsSimulating(false);
+        socket.emit("driver:status_toggle", { isLive: isLiveGps, isSimulating: false });
+    }, [isLiveGps]);
 
-    // ── Real Browser Geolocation Watcher ──────────────────────────────────
-    useEffect(() => {
-        if (!isLiveGps) {
-            if (geoWatchIdRef.current) navigator.geolocation.clearWatch(geoWatchIdRef.current);
+    const startSimulation = useCallback(() => {
+        if (!publishedRoute || !publishedRoute.osrmRoute || publishedRoute.osrmRoute.length < 2) {
+            alert("No road route polyline available to simulate. Dispatch a route first.");
             return;
         }
 
+        if (isLiveGps) {
+            alert("Please stop Browser GPS before starting the drive simulation.");
+            return;
+        }
+
+        setIsSimulating(true);
+        socket.emit("driver:status_toggle", { isLive: false, isSimulating: true });
+
+        const polyline = publishedRoute.osrmRoute;
+        simulationIndexRef.current = 0;
+
+        simulationTimerRef.current = setInterval(() => {
+            simulationIndexRef.current += 1;
+
+            if (simulationIndexRef.current >= polyline.length) {
+                stopSimulation();
+                return;
+            }
+
+            const prevPos = polyline[simulationIndexRef.current - 1];
+            const currPos = polyline[simulationIndexRef.current];
+            const heading = computeHeading(prevPos, currPos);
+            const speed = Math.floor(25 + Math.random() * 20); // 25-45 km/h
+
+            broadcastTelemetry(currPos, heading, speed, false);
+            checkAutoArrival(currPos);
+
+        }, 600); // Step every 600ms
+    }, [publishedRoute, isLiveGps, broadcastTelemetry, checkAutoArrival, stopSimulation]);
+
+    // ── HTML5 Geolocation (Real GPS Tracking) ──────────────────────────────
+    const stopLiveGps = useCallback(() => {
+        if (geoWatchIdRef.current !== null) {
+            navigator.geolocation.clearWatch(geoWatchIdRef.current);
+            geoWatchIdRef.current = null;
+        }
+        setIsLiveGps(false);
+        socket.emit("driver:status_toggle", { isLive: false, isSimulating });
+    }, [isSimulating]);
+
+    const startLiveGps = useCallback(() => {
         if (!navigator.geolocation) {
+            alert("Geolocation is not supported by your browser.");
             return;
         }
 
+        if (isSimulating) {
+            stopSimulation();
+        }
+
+        setIsLiveGps(true);
         socket.emit("driver:status_toggle", { isLive: true, isSimulating: false });
+
+        let lastPos = null;
 
         geoWatchIdRef.current = navigator.geolocation.watchPosition(
             (pos) => {
-                const lat = pos.coords.latitude;
-                const lng = pos.coords.longitude;
-                const heading = pos.coords.heading || 0;
-                const speed = Math.round((pos.coords.speed || 0) * 3.6);
+                const currPos = [pos.coords.latitude, pos.coords.longitude];
+                const heading = pos.coords.heading || (lastPos ? computeHeading(lastPos, currPos) : 0);
+                const speed = pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0;
 
-                broadcastTelemetry([lat, lng], heading, speed, false);
+                lastPos = currPos;
+                broadcastTelemetry(currPos, heading, speed, false);
+                checkAutoArrival(currPos);
             },
             (err) => {
-                console.error("GPS error:", err);
+                alert(`GPS Tracking Error: ${err.message}`);
+                stopLiveGps();
             },
-            { enableHighAccuracy: true, maximumAge: 2000 }
+            {
+                enableHighAccuracy: true,
+                maximumAge: 1000,
+                timeout: 5000
+            }
         );
+    }, [isSimulating, stopSimulation, stopLiveGps, broadcastTelemetry, checkAutoArrival]);
 
-        return () => {
-            if (geoWatchIdRef.current) navigator.geolocation.clearWatch(geoWatchIdRef.current);
-        };
-    }, [isLiveGps, broadcastTelemetry]);
-
-    // ── Simulate Detour (Test Deviation Alert) ─────────────────────────────
-    function handleSimulateDetour() {
-        if (!driverPosition) return;
-        setIsSimulating(false);
-        setIsLiveGps(false);
-
-        const detourPos = [driverPosition[0] + 0.0085, driverPosition[1] + 0.0085];
-        broadcastTelemetry(detourPos, 45, 30, true);
+    // ── Trigger Simulated Route Deviation (> 500m Off-Route) ───────────────
+    function handleTriggerDeviation() {
+        if (!driverPosition) {
+            alert("No vehicle location to deviate.");
+            return;
+        }
+        // Offset coordinates by ~0.01 degrees (~1.1 km detour)
+        const detourPos = [driverPosition[0] + 0.009, driverPosition[1] + 0.009];
+        broadcastTelemetry(detourPos, driverHeading, 35, true);
     }
 
+    // Cleanup timers and GPS watch on unmount
+    useEffect(() => {
+        return () => {
+            if (simulationTimerRef.current) clearInterval(simulationTimerRef.current);
+            if (geoWatchIdRef.current !== null) navigator.geolocation.clearWatch(geoWatchIdRef.current);
+        };
+    }, []);
 
-    // ── No route published yet ────────────────────────────────────────────
-    if (!publishedRoute) {
+    // ── Derived View Metrics ───────────────────────────────────────────────
+    const stops = publishedRoute?.stops || [];
+    const depot = publishedRoute?.depot || null;
+    const osrmRoute = publishedRoute?.osrmRoute || [];
+    const completedCount = completedIds.size;
+    const totalCount = stops.length;
+    const progressPercent = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+
+    // Find next pending stop for Turn-by-Turn Guidance
+    const nextPendingStop = stops.find((s) => !completedIds.has(s.id));
+    const nextStopDistanceKm = (nextPendingStop && driverPosition)
+        ? Math.round(calculateDistance(driverPosition, nextPendingStop.position) * 100) / 100
+        : null;
+
+    if (isLoadingRoute) {
         return (
             <div className="flex items-center justify-center h-[calc(100vh-57px)] bg-gray-950 text-gray-100">
-                <div className="text-center max-w-sm mx-auto p-8 bg-gray-900 border border-gray-800 rounded-2xl shadow-xl">
-                    <div className="text-6xl mb-4">🚚</div>
-                    <h2 className="text-lg font-bold text-white mb-2">
-                        No Route Assigned
-                    </h2>
-                    <p className="text-gray-400 text-xs leading-relaxed mb-4">
-                        The dispatcher hasn't published an active delivery route yet.
-                    </p>
-                    <a
-                        href="/dispatcher"
-                        className="inline-block px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg transition-colors"
-                    >
-                        Go to Dispatcher Dashboard →
-                    </a>
+                <div className="flex flex-col items-center gap-3">
+                    <div className="w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                    <p className="text-xs text-gray-400 font-mono">Loading active route from DB...</p>
                 </div>
             </div>
         );
     }
-
-    const { depot, stops, osrmRoute, publishedAt } = publishedRoute;
-    const totalCount = stops.length;
-    const completedCount = completedIds.size;
-    const allDone = completedCount === totalCount;
-
-    // Find next uncompleted stop
-    const nextStop = stops.find((s) => !completedIds.has(s.id));
-    const distToNext = (nextStop && driverPosition)
-        ? Math.round(calculateDistance(driverPosition, nextStop.position) * 10) / 10
-        : null;
-
 
     return (
         <div className="flex flex-col md:flex-row h-[calc(100vh-57px)] overflow-hidden bg-gray-950 text-gray-100">
@@ -251,17 +290,17 @@ function Driver() {
                     onClick={() => setMobileTab("checklist")}
                     className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${
                         mobileTab === "checklist"
-                            ? "bg-blue-600 text-white shadow"
+                            ? "bg-emerald-600 text-white shadow"
                             : "bg-gray-800 text-gray-400"
                     }`}
                 >
-                    📋 Stops ({completedCount}/{totalCount})
+                    📋 Stops Checklist ({completedCount}/{totalCount})
                 </button>
                 <button
                     onClick={() => setMobileTab("map")}
                     className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${
                         mobileTab === "map"
-                            ? "bg-blue-600 text-white shadow"
+                            ? "bg-emerald-600 text-white shadow"
                             : "bg-gray-800 text-gray-400"
                     }`}
                 >
@@ -269,243 +308,243 @@ function Driver() {
                 </button>
             </div>
 
-            {/* ── DRIVER SIDEBAR ───────────────────────────────────── */}
+            {/* ── SIDEBAR: TURN-BY-TURN & STOP CHECKLIST ───────────── */}
             <aside className={`w-full md:w-96 flex flex-col bg-gray-900 border-r border-gray-800 overflow-y-auto flex-shrink-0 ${
                 mobileTab === "map" ? "hidden md:flex" : "flex"
             }`}>
 
-                {/* Header */}
-                <div className="px-4 py-3.5 bg-gray-950 border-b border-gray-800">
-                    <div className="flex items-center justify-between">
+                {/* Driver Header */}
+                <div className="px-4 py-3.5 bg-gray-950 border-b border-gray-800 flex items-center justify-between">
+                    <div>
                         <h1 className="text-white font-extrabold text-base tracking-tight flex items-center gap-1.5">
-                            <span>🚚</span> Driver Navigation
+                            <span>🚚</span> Driver Console
                         </h1>
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
-                            Live WebSocket
-                        </span>
+                        <p className="text-gray-400 text-xs mt-0.5">
+                            Real-Time Indian Route Navigation & Telemetry
+                        </p>
                     </div>
-                    <p className="text-gray-400 text-xs mt-1 font-mono text-[11px]">
-                        Published: {publishedAt}
-                    </p>
+
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                        DB Synced
+                    </span>
                 </div>
 
-                {/* ── NEXT STOP TURN-BY-TURN GUIDANCE CARD ── */}
-                {nextStop && (
-                    <div className="px-4 py-3 bg-gradient-to-r from-blue-950/90 to-indigo-950/90 border-b border-blue-900/60 text-white space-y-2.5">
+                {/* ── NEXT STOP GUIDANCE HERO CARD ── */}
+                {nextPendingStop && (
+                    <div className="m-4 p-4 rounded-2xl bg-gradient-to-br from-blue-950/80 to-indigo-950/80 border border-blue-600/50 shadow-xl space-y-3">
                         <div className="flex items-center justify-between">
-                            <span className="text-[10px] font-bold uppercase tracking-wider text-blue-300 flex items-center gap-1">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-blue-400 flex items-center gap-1">
                                 <span>🎯</span> Next Delivery Target
                             </span>
-                            {nextStop.priority === "urgent" && (
-                                <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-red-500/20 text-red-300 border border-red-500/40">
+                            {nextPendingStop.priority === "urgent" && (
+                                <span className="px-2 py-0.5 rounded text-[9px] font-extrabold bg-red-600/30 text-red-300 border border-red-500/50 animate-pulse">
                                     ⚡ URGENT
                                 </span>
                             )}
                         </div>
 
                         <div>
-                            <h3 className="text-sm font-bold text-white truncate">{nextStop.name}</h3>
-                            <p className="text-xs text-gray-300 mt-0.5 font-mono">
-                                {distToNext !== null ? `~${distToNext} km away` : "En route"}
+                            <h2 className="text-lg font-black text-white leading-tight">
+                                {nextPendingStop.name}
+                            </h2>
+                            <p className="text-xs font-mono text-gray-400 mt-1">
+                                {nextPendingStop.position[0].toFixed(5)}, {nextPendingStop.position[1].toFixed(5)}
                             </p>
                         </div>
 
+                        <div className="flex items-center justify-between pt-1 border-t border-blue-800/40 text-xs">
+                            <span className="text-gray-300">
+                                Distance: <strong className="text-white font-mono">{nextStopDistanceKm !== null ? `${nextStopDistanceKm} km` : "Approaching"}</strong>
+                            </span>
+                            <span className="text-emerald-400 font-bold text-[11px]">
+                                📍 Auto-arrives within 250m
+                            </span>
+                        </div>
+
+                        {/* Direct Google Maps Deep-link */}
                         <a
-                            href={`https://www.google.com/maps/dir/?api=1&destination=${nextStop.position[0]},${nextStop.position[1]}`}
+                            href={`https://www.google.com/maps/dir/?api=1&destination=${nextPendingStop.position[0]},${nextPendingStop.position[1]}`}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg shadow transition-all flex items-center justify-center gap-1.5"
+                            className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-md shadow-blue-600/20"
                         >
                             <span>🗺️</span>
-                            <span>Open in Google Maps Navigation</span>
+                            <span>Open in Google Maps</span>
                         </a>
                     </div>
                 )}
 
-                {/* ── TELEMETRY & SIMULATOR CONTROLS ── */}
-                <div className="px-4 py-3 bg-gray-950/70 border-b border-gray-800 space-y-2.5">
-                    <p className="text-[11px] uppercase font-bold tracking-wider text-blue-400">
-                        📡 Telemetry & Simulation Controls
-                    </p>
-
-                    <div className="grid grid-cols-2 gap-2">
-                        <button
-                            onClick={() => {
-                                setIsLiveGps(false);
-                                setIsSimulating((prev) => !prev);
-                            }}
-                            className={`py-2 px-2 text-xs font-semibold rounded-lg shadow transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                                isSimulating
-                                    ? "bg-amber-600 hover:bg-amber-500 text-white shadow-amber-600/20"
-                                    : "bg-blue-600 hover:bg-blue-500 text-white shadow-blue-600/20"
-                            }`}
-                        >
-                            <span>{isSimulating ? "⏸ Stop Sim" : "🚀 Drive Sim"}</span>
-                        </button>
-
-                        <button
-                            onClick={() => {
-                                setIsSimulating(false);
-                                setIsLiveGps((prev) => !prev);
-                            }}
-                            className={`py-2 px-2 text-xs font-semibold rounded-lg shadow transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                                isLiveGps
-                                    ? "bg-emerald-600 hover:bg-emerald-500 text-white"
-                                    : "bg-gray-800 hover:bg-gray-700 text-gray-300"
-                            }`}
-                        >
-                            <span>{isLiveGps ? "📡 Live GPS: ON" : "📱 Browser GPS"}</span>
-                        </button>
-                    </div>
-
-                    {/* Detour Trigger */}
-                    <button
-                        onClick={handleSimulateDetour}
-                        className="w-full py-1.5 bg-rose-950/70 hover:bg-rose-900 border border-rose-800/80 text-rose-300 text-xs font-medium rounded-lg transition-colors cursor-pointer flex items-center justify-center gap-1.5"
-                    >
-                        <span>⚠️ Simulate Off-Route Detour</span>
-                    </button>
-
-                    {/* Live Telemetry Pill */}
-                    {driverPosition && (
-                        <div className="bg-gray-900 border border-gray-800 rounded-lg p-2 text-[11px] font-mono text-gray-300 flex justify-between items-center">
-                            <span>Speed: <strong>{driverSpeed} km/h</strong></span>
-                            <span>Heading: <strong>{driverHeading}°</strong></span>
-                            <span className={isDeviated ? "text-rose-400 font-bold" : "text-emerald-400"}>
-                                {isDeviated ? "OFF-ROUTE" : "ON-ROUTE"}
-                            </span>
-                        </div>
-                    )}
-                </div>
-
-                {/* ── PROGRESS SUMMARY ── */}
-                <div className="px-4 py-3.5 border-b border-gray-800">
-                    <div className="flex items-center justify-between mb-2">
-                        <p className="text-xs text-gray-400 uppercase font-semibold tracking-wide">
-                            Delivery Progress
-                        </p>
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-                            allDone ? "bg-emerald-500/20 text-emerald-300" : "bg-blue-500/20 text-blue-300"
-                        }`}>
-                            {completedCount} / {totalCount} Done
+                {/* ── OVERALL PROGRESS BAR ── */}
+                <div className="px-4 py-3 bg-gray-950/60 border-y border-gray-800 space-y-1.5">
+                    <div className="flex justify-between text-xs">
+                        <span className="text-gray-400 font-semibold">Route Completion</span>
+                        <span className="text-emerald-400 font-bold font-mono">
+                            {completedCount} / {totalCount} Stops ({progressPercent}%)
                         </span>
                     </div>
-
                     <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
                         <div
-                            className={`h-2 rounded-full transition-all duration-300 ${
-                                allDone ? "bg-emerald-400 shadow-sm shadow-emerald-400/50" : "bg-blue-500 shadow-sm shadow-blue-500/50"
-                            }`}
-                            style={{
-                                width: totalCount > 0 ? `${(completedCount / totalCount) * 100}%` : "0%"
-                            }}
+                            className="bg-gradient-to-r from-emerald-500 to-teal-400 h-2 rounded-full transition-all duration-500"
+                            style={{ width: `${progressPercent}%` }}
                         />
                     </div>
+                </div>
 
-                    {allDone && (
-                        <p className="mt-2 text-xs font-bold text-emerald-400 text-center">
-                            🎉 All deliveries complete!
-                        </p>
+                {/* ── TELEMETRY & SIMULATION CONTROLS ── */}
+                <div className="p-4 bg-gray-950/40 border-b border-gray-800 space-y-2.5">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 block">
+                        📡 Telemetry & Simulation Controls
+                    </span>
+
+                    <div className="grid grid-cols-2 gap-2">
+                        {/* Simulation Toggle */}
+                        <button
+                            onClick={isSimulating ? stopSimulation : startSimulation}
+                            disabled={!publishedRoute}
+                            className={`py-2.5 px-3 rounded-xl font-bold text-xs transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                                isSimulating
+                                    ? "bg-amber-600 hover:bg-amber-500 text-white shadow-lg shadow-amber-600/30 animate-pulse"
+                                    : "bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700"
+                            }`}
+                        >
+                            <span>{isSimulating ? "⏹️ Stop Drive Sim" : "▶️ Simulate Drive"}</span>
+                        </button>
+
+                        {/* Live GPS Toggle */}
+                        <button
+                            onClick={isLiveGps ? stopLiveGps : startLiveGps}
+                            className={`py-2.5 px-3 rounded-xl font-bold text-xs transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                                isLiveGps
+                                    ? "bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 animate-pulse"
+                                    : "bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700"
+                            }`}
+                        >
+                            <span>{isLiveGps ? "🟢 Stop GPS" : "📡 Browser GPS"}</span>
+                        </button>
+                    </div>
+
+                    {/* Trigger Simulated Deviation Detour */}
+                    {driverPosition && (
+                        <button
+                            onClick={handleTriggerDeviation}
+                            className="w-full py-1.5 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/60 font-semibold text-[11px] rounded-lg transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                        >
+                            <span>⚠️</span>
+                            <span>Simulate Route Deviation Detour (&gt;500m)</span>
+                        </button>
                     )}
                 </div>
 
-                {/* ── DEPOT INFO ── */}
-                <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-2.5">
-                    <span className="text-lg">🏭</span>
-                    <div>
-                        <p className="text-xs font-bold text-gray-200">Depot (Start / Return)</p>
-                        <p className="text-[11px] text-gray-400 font-mono">
-                            {depot[0].toFixed(4)}, {depot[1].toFixed(4)}
-                        </p>
-                    </div>
-                </div>
+                {/* ── STOPS CHECKLIST ── */}
+                <div className="p-4 space-y-2 flex-1">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 block mb-1">
+                        📦 Delivery Sequence Checklist
+                    </span>
 
-                {/* ── STOP CHECKLIST ── */}
-                <div className="px-4 py-3.5 flex-1">
-                    <p className="text-xs text-gray-400 uppercase font-semibold tracking-wide mb-2.5">
-                        Delivery Sequence ({stops.length})
-                    </p>
+                    {stops.length === 0 ? (
+                        <div className="text-center py-8 text-gray-500 text-xs space-y-2">
+                            <span className="text-3xl block">📋</span>
+                            <p>No active delivery route published.</p>
+                            <p className="text-[11px] text-gray-600">The dispatcher will publish an optimized tour here.</p>
+                        </div>
+                    ) : (
+                        <ul className="space-y-2">
+                            {stops.map((stop, index) => {
+                                const isDone = completedIds.has(stop.id);
+                                const isNext = !isDone && nextPendingStop?.id === stop.id;
 
-                    <div className="space-y-2">
-                        {stops.map((stop, index) => {
-                            const isDone = completedIds.has(stop.id);
+                                return (
+                                    <li
+                                        key={stop.id}
+                                        className={`p-3 rounded-xl border transition-all flex items-center justify-between gap-3 ${
+                                            isDone
+                                                ? "bg-emerald-950/20 border-emerald-800/40 text-gray-500 opacity-60"
+                                                : isNext
+                                                ? "bg-blue-950/40 border-blue-500/80 text-white shadow-md shadow-blue-900/20"
+                                                : "bg-gray-950/50 border-gray-800 text-gray-300"
+                                        }`}
+                                    >
+                                        <div className="flex items-center gap-3 min-w-0">
+                                            <button
+                                                onClick={() => toggleStopDone(stop.id)}
+                                                className={`w-6 h-6 rounded-lg border flex items-center justify-center font-bold text-xs transition-colors cursor-pointer flex-shrink-0 ${
+                                                    isDone
+                                                        ? "bg-emerald-600 border-emerald-500 text-white"
+                                                        : "bg-gray-900 border-gray-700 text-transparent hover:border-blue-500"
+                                                }`}
+                                            >
+                                                ✓
+                                            </button>
 
-                            return (
-                                <div
-                                    key={stop.id}
-                                    onClick={() => toggleStopDone(stop.id)}
-                                    className={`
-                                        flex items-center gap-3 rounded-xl border p-3 cursor-pointer
-                                        transition-all duration-200
-                                        ${isDone
-                                            ? "bg-emerald-950/30 border-emerald-900/60 opacity-60"
-                                            : "bg-gray-800/80 border-gray-700/60 hover:border-blue-500 hover:bg-gray-800"
-                                        }
-                                    `}
-                                >
-                                    <div className={`
-                                        flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold
-                                        transition-colors duration-200
-                                        ${isDone ? "bg-emerald-500 text-white" : "bg-gray-700 text-gray-300"}
-                                    `}>
-                                        {isDone ? "✓" : index + 1}
-                                    </div>
-
-                                    <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-1.5">
-                                            <p className={`text-xs font-semibold truncate ${
-                                                isDone ? "line-through text-gray-500" : "text-white"
-                                            }`}>
-                                                {stop.name}
-                                            </p>
-                                            {stop.priority === "urgent" && (
-                                                <span className="text-[10px] text-red-400 font-bold">⚡</span>
-                                            )}
+                                            <div className="min-w-0">
+                                                <div className="flex items-center gap-1.5">
+                                                    <span className="text-xs font-bold text-gray-400 font-mono">
+                                                        #{index + 1}
+                                                    </span>
+                                                    <span className={`text-xs font-bold truncate ${isDone ? "line-through text-gray-500" : "text-white"}`}>
+                                                        {stop.name}
+                                                    </span>
+                                                    {stop.priority === "urgent" && (
+                                                        <span className="text-[10px]">⚡</span>
+                                                    )}
+                                                </div>
+                                                <p className="text-[10px] font-mono text-gray-500">
+                                                    {stop.position[0].toFixed(4)}, {stop.position[1].toFixed(4)}
+                                                </p>
+                                            </div>
                                         </div>
-                                        <p className="text-[10px] text-gray-400 font-mono mt-0.5">
-                                            {stop.position[0].toFixed(4)}, {stop.position[1].toFixed(4)}
-                                        </p>
-                                    </div>
 
-                                    <span className="text-[11px] text-gray-400 flex-shrink-0 font-medium">
-                                        {isDone ? "Done" : "Tap"}
-                                    </span>
-                                </div>
-                            );
-                        })}
-                    </div>
+                                        {isDone ? (
+                                            <span className="text-[10px] font-bold text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800/60">
+                                                Delivered
+                                            </span>
+                                        ) : isNext ? (
+                                            <span className="text-[10px] font-bold text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-700/60 animate-pulse">
+                                                Next Stop
+                                            </span>
+                                        ) : null}
+                                    </li>
+                                );
+                            })}
+                        </ul>
+                    )}
                 </div>
-
-                {/* ── CLEAR PROGRESS ── */}
-                {completedCount > 0 && (
-                    <div className="px-4 py-3 border-t border-gray-800">
-                        <button
-                            onClick={handleClearProgress}
-                            className="w-full py-2 text-xs text-red-400 hover:text-red-300 hover:bg-red-950/40 rounded-lg transition-colors cursor-pointer font-medium"
-                        >
-                            ↺ Clear Progress
-                        </button>
-                    </div>
-                )}
 
             </aside>
 
-            {/* ── MAP (Full width on mobile when map tab is active) ── */}
-            <div className={`flex-1 h-full relative ${
-                mobileTab === "checklist" ? "hidden md:block" : "block"
+            {/* ── MAP VIEW ─────────────────────────────────────────── */}
+            <main className={`flex-1 flex flex-col relative ${
+                mobileTab === "checklist" ? "hidden md:flex" : "flex"
             }`}>
+
+                {/* Telemetry HUD Badge */}
+                <div className="absolute top-4 left-4 z-[999] bg-gray-900/90 border border-gray-700/80 rounded-xl px-4 py-2.5 shadow-2xl backdrop-blur-md flex items-center gap-3 text-xs">
+                    <span className="text-xl">🚚</span>
+                    <div>
+                        <div className="flex items-center gap-2">
+                            <span className="font-bold text-white">Speed: {driverSpeed} km/h</span>
+                            <span className="text-gray-500">•</span>
+                            <span className="font-mono text-gray-300">Heading: {Math.round(driverHeading)}°</span>
+                        </div>
+                        <p className={`text-[11px] font-semibold ${isDeviated ? "text-red-400" : "text-emerald-400"}`}>
+                            {isDeviated ? "⚠️ Off Route (&gt;500m Detour)" : "🟢 GPS Telemetry Active"}
+                        </p>
+                    </div>
+                </div>
+
+                {/* Leaflet Map */}
                 <MapView
                     stops={stops}
                     depot={depot}
-                    onMapClick={() => {}}
-                    selectedPosition={null}
-                    routePositions={osrmRoute || []}
+                    routePositions={osrmRoute}
                     driverPosition={driverPosition}
                     driverHeading={driverHeading}
                     isDeviated={isDeviated}
+                    completedStopIds={completedIds}
                 />
-            </div>
+
+            </main>
 
         </div>
     );

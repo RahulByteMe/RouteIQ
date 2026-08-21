@@ -9,26 +9,32 @@ import AlgorithmVisualizer from "../components/AlgorithmVisualizer";
 import ManifestModal from "../components/ManifestModal";
 import { optimizeRouteWithRoadNetwork, optimizeRouteWithBenchmark } from "../utils/optimizeRoute";
 import { socket } from "../services/socket";
-import { publishRoute } from "../services/api";
+import {
+    fetchStops,
+    fetchDepot,
+    createStop,
+    deleteStop,
+    saveBatchStops,
+    saveDepot,
+    publishRoute
+} from "../services/api";
 import { checkRouteDeviation } from "../utils/deviation";
 import { CITY_PRESETS } from "../data/cityPresets";
 
-// ─── Dispatcher Page ────────────────────────────────────────────────────────
+// ─── Dispatcher Page (India-Only Logistics Hub & DB Connected) ──────────────
 //
 // WHO USES THIS:
-//   The dispatcher — the person in the office who plans deliveries.
+//   The dispatcher planning delivery logistics across Indian metropolitan networks.
 //
-// ENHANCED PORTFOLIO FEATURES:
-//   1. Global City Presets & Browser Geolocation Auto-Detection.
-//   2. Mobile-responsive split view with Map vs Panel toggle.
-//   3. Stop Priority Tagging (Urgent ⚡ vs Standard vs Flexible).
-//   4. Green Logistics / ESG Carbon & Fuel savings calculation.
-//   5. One-Click CSV Delivery Manifest Exporter.
-//   6. Real-time WebSocket Driver Tracking & Automated Deviation Re-Routing.
+// FEATURES:
+//   1. 100% Backend Database Storage (PostgreSQL / REST API).
+//   2. Curated Indian Metropolitan Presets (Delhi NCR, Bengaluru, Mumbai, etc.).
+//   3. OSRM Road-Network Matrix-Aware 2-Opt Optimization.
+//   4. Real-time WebSocket Driver Tracking & Automated Deviation Re-Routing.
+//   5. Delivery Manifest Exporter (CSV, Print, Copy).
 // ───────────────────────────────────────────────────────────────────────────
 
 function Dispatcher() {
-
     const navigate = useNavigate();
 
     // ── Form inputs ──────────────────────────────────────────────────────
@@ -37,18 +43,10 @@ function Dispatcher() {
     const [longitude, setLongitude] = useState("");
     const [priority, setPriority] = useState("standard");
 
-    // ── Stops & Depot (Defaulting to NYC Preset) ───────────────────────────
-    const [stops, setStops] = useState(() => {
-        const saved = localStorage.getItem("dispatcher_stops");
-        return saved ? JSON.parse(saved) : CITY_PRESETS[0].stops;
-    });
-
-    const [depot, setDepot] = useState(() => {
-        const saved = localStorage.getItem("dispatcher_depot");
-        return saved ? JSON.parse(saved) : CITY_PRESETS[0].depot;
-    });
-
-    const [selectedCityId, setSelectedCityId] = useState("nyc");
+    // ── Stops & Depot (Synced with Backend DB) ────────────────────────────
+    const [stops, setStops] = useState(CITY_PRESETS[0].stops);
+    const [depot, setDepot] = useState(CITY_PRESETS[0].depot);
+    const [selectedCityId, setSelectedCityId] = useState("delhi");
 
     // ── Modes / UI state ─────────────────────────────────────────────────
     const [isDepotMode, setIsDepotMode] = useState(false);
@@ -81,8 +79,34 @@ function Dispatcher() {
     // ── Publish state ─────────────────────────────────────────────────────
     const [isPublished, setIsPublished] = useState(false);
 
+    // ── Fetch Initial Data from Backend Database ─────────────────────────
+    useEffect(() => {
+        async function loadInitialData() {
+            try {
+                const [dbStops, dbDepot] = await Promise.all([fetchStops(), fetchDepot()]);
+                if (dbStops && dbStops.length > 0) {
+                    setStops(dbStops);
+                } else {
+                    // Seed initial Delhi NCR preset to database
+                    await saveBatchStops(CITY_PRESETS[0].stops);
+                    setStops(CITY_PRESETS[0].stops);
+                }
 
-    // ── WebSocket Telemetry & Progress Listeners (Phase 3) ────────────────
+                if (dbDepot) {
+                    setDepot(dbDepot);
+                } else {
+                    await saveDepot(CITY_PRESETS[0].depot);
+                    setDepot(CITY_PRESETS[0].depot);
+                }
+            } catch (err) {
+                console.warn("Could not load stops/depot from backend database:", err);
+            }
+        }
+
+        loadInitialData();
+    }, []);
+
+    // ── WebSocket Telemetry & Progress Listeners ───────────────────────────
     useEffect(() => {
         function handleDriverMoved(telemetry) {
             setDriverTelemetry(telemetry);
@@ -118,19 +142,6 @@ function Dispatcher() {
         };
     }, [osrmRoute]);
 
-
-    // ── Persist dispatcher's own stops + depot ───────────────────────────
-    useEffect(() => {
-        localStorage.setItem("dispatcher_stops", JSON.stringify(stops));
-    }, [stops]);
-
-    useEffect(() => {
-        if (depot !== null) {
-            localStorage.setItem("dispatcher_depot", JSON.stringify(depot));
-        }
-    }, [depot]);
-
-
     // ── resetRoute ───────────────────────────────────────────────────────
     function resetRoute() {
         setOptimizedStops([]);
@@ -144,33 +155,38 @@ function Dispatcher() {
         setDeviationState({ isDeviated: false, distanceMeters: 0 });
     }
 
-
-    // ── City Preset Switcher ──────────────────────────────────────────────
-    function handleSelectCityPreset(cityId) {
+    // ── Indian City Preset Switcher (Saves to DB) ──────────────────────────
+    async function handleSelectCityPreset(cityId) {
         setSelectedCityId(cityId);
         const preset = CITY_PRESETS.find((c) => c.id === cityId);
         if (preset) {
             setDepot(preset.depot);
             setStops(preset.stops);
             resetRoute();
+            // Sync with backend Database
+            await Promise.all([
+                saveDepot(preset.depot),
+                saveBatchStops(preset.stops)
+            ]);
         }
     }
 
-    // ── Detect User Location ──────────────────────────────────────────────
-    function handleDetectMyLocation() {
+    // ── Detect User Location (GPS) ─────────────────────────────────────────
+    async function handleDetectMyLocation() {
         if (!navigator.geolocation) {
             alert("Geolocation is not supported by your browser.");
             return;
         }
 
         navigator.geolocation.getCurrentPosition(
-            (pos) => {
+            async (pos) => {
                 const userPos = [pos.coords.latitude, pos.coords.longitude];
                 setDepot(userPos);
                 setSelectedPosition(userPos);
                 setSelectedCityId("custom");
                 resetRoute();
-                alert(`📍 Depot set to your current location:\n${userPos[0].toFixed(4)}, ${userPos[1].toFixed(4)}`);
+                await saveDepot(userPos);
+                alert(`📍 Depot updated in DB to your current location:\n${userPos[0].toFixed(4)}, ${userPos[1].toFixed(4)}`);
             },
             (err) => {
                 alert(`Could not retrieve location: ${err.message}`);
@@ -180,25 +196,25 @@ function Dispatcher() {
     }
 
     // ── Clear All Data (Blank Canvas) ─────────────────────────────────────
-    function handleClearAll() {
+    async function handleClearAll() {
         if (window.confirm("Clear all stops and depot to start with a blank canvas?")) {
             setDepot(null);
             setStops([]);
             setSelectedCityId("custom");
             resetRoute();
-            localStorage.removeItem("dispatcher_stops");
-            localStorage.removeItem("dispatcher_depot");
+            await saveBatchStops([]);
         }
     }
 
-
     // ── handleMapClick ───────────────────────────────────────────────────
-    function handleMapClick(e) {
+    async function handleMapClick(e) {
         const { lat, lng } = e.latlng;
         if (isDepotMode) {
-            setDepot([lat, lng]);
+            const newDepot = [lat, lng];
+            setDepot(newDepot);
             setIsDepotMode(false);
             resetRoute();
+            await saveDepot(newDepot);
         } else {
             setLatitude(lat.toFixed(6));
             setLongitude(lng.toFixed(6));
@@ -206,22 +222,24 @@ function Dispatcher() {
         }
     }
 
-    // ── handleAddStop ────────────────────────────────────────────────────
-    function handleAddStop() {
+    // ── handleAddStop (Direct DB Persistence) ─────────────────────────────
+    async function handleAddStop() {
         if (editingId === null) {
-            const newStop = {
-                id: Date.now(),
+            const newStopPayload = {
                 name,
                 position: [Number(latitude), Number(longitude)],
                 priority
             };
-            setStops([...stops, newStop]);
+            const created = await createStop(newStopPayload);
+            setStops((prev) => [...prev, created]);
         } else {
-            setStops(stops.map((s) =>
+            const updatedStops = stops.map((s) =>
                 s.id === editingId
                     ? { id: s.id, name, position: [Number(latitude), Number(longitude)], priority }
                     : s
-            ));
+            );
+            setStops(updatedStops);
+            await saveBatchStops(updatedStops);
             setEditingId(null);
         }
         setName(""); setLatitude(""); setLongitude(""); setPriority("standard");
@@ -229,8 +247,9 @@ function Dispatcher() {
         resetRoute();
     }
 
-    function handleDeleteStop(id) {
-        setStops(stops.filter((s) => s.id !== id));
+    async function handleDeleteStop(id) {
+        await deleteStop(id);
+        setStops((prev) => prev.filter((s) => s.id !== id));
         resetRoute();
     }
 
@@ -285,7 +304,7 @@ function Dispatcher() {
 
     async function handleOptimize() {
         if (!depot) {
-            alert("Please set a depot first.\n\nClick '🏭 Set Depot', or select a City Preset.");
+            alert("Please set an Indian depot first.\n\nClick '🏭 Set Depot', or select an Indian City Preset.");
             return;
         }
         if (stops.length === 0) {
@@ -295,7 +314,7 @@ function Dispatcher() {
         await executeOptimization(stops, depot);
     }
 
-    // ── One-Click Re-Optimization from Live Driver Location (Phase 4) ─────
+    // ── One-Click Re-Optimization from Live Driver Location ────────────────
     async function handleReoptimizeFromDriver() {
         if (!driverTelemetry?.position) {
             alert("No live driver position available for re-routing.");
@@ -316,7 +335,7 @@ function Dispatcher() {
             osrmRoute: osrmRoute,
             osrmDistance: osrmDistance,
             benchmark: benchmarkData,
-            publishedAt: new Date().toLocaleString() + " (Re-Optimized)"
+            publishedAt: new Date().toLocaleString()
         };
 
         await publishRoute(routePayload);
@@ -340,7 +359,7 @@ function Dispatcher() {
         setVisualizerRoutePositions(null);
     }
 
-    // ── handlePublish (REST API + WebSockets) ─────────────────────────────
+    // ── handlePublish (Persist to PostgreSQL DB & Broadcast via WS) ────────
     async function handlePublish() {
         if (!hasOptimized) {
             alert("Please optimize the route first before publishing.");
@@ -360,11 +379,9 @@ function Dispatcher() {
         setIsPublished(true);
     }
 
-
     const activeRoutePositions = visualizerRoutePositions || osrmRoute;
     const completedCount = completedStopIds.size;
     const totalCount = optimizedStops.length || stops.length;
-
 
     return (
         <div className="flex flex-col md:flex-row h-[calc(100vh-57px)] overflow-hidden bg-gray-950 text-gray-100">
@@ -402,42 +419,42 @@ function Dispatcher() {
                 <div className="px-4 py-3.5 bg-gray-950 border-b border-gray-800 flex items-center justify-between">
                     <div>
                         <h1 className="text-white font-extrabold text-base tracking-tight flex items-center gap-1.5">
-                            <span>📋</span> Dispatcher Control
+                            <span>📋</span> Dispatcher Hub
                         </h1>
                         <p className="text-gray-400 text-xs mt-0.5">
-                            Plan, sequence & dispatch fleets
+                            Indian Logistics & Multi-Stop Dispatch
                         </p>
                     </div>
 
-                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40">
-                        <span className="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
-                        Live Hub
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                        DB Synced
                     </span>
                 </div>
 
-                {/* ── GLOBAL CITY PRESETS & GEOLOCATION ── */}
+                {/* ── INDIAN METROPOLITAN HUBS ── */}
                 <div className="px-4 py-3 bg-gray-950/60 border-b border-gray-800 space-y-2">
                     <div className="flex items-center justify-between">
                         <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400">
-                            🌍 Global City Presets
+                            🇮🇳 Indian Metropolitan Hubs
                         </span>
                         <button
                             onClick={handleDetectMyLocation}
                             className="text-[11px] text-emerald-400 hover:text-emerald-300 underline font-medium cursor-pointer"
                         >
-                            📍 My Location
+                            📍 My GPS
                         </button>
                     </div>
 
                     {/* Presets Grid */}
-                    <div className="grid grid-cols-3 gap-1.5">
+                    <div className="grid grid-cols-2 gap-1.5">
                         {CITY_PRESETS.map((city) => (
                             <button
                                 key={city.id}
                                 onClick={() => handleSelectCityPreset(city.id)}
-                                className={`py-1.5 px-2 text-[11px] font-medium rounded-lg border transition-all truncate cursor-pointer ${
+                                className={`py-1.5 px-2 text-[11px] font-medium rounded-lg border transition-all truncate cursor-pointer text-left ${
                                     selectedCityId === city.id
-                                        ? "bg-blue-600/30 border-blue-500 text-blue-300 font-bold"
+                                        ? "bg-blue-600/30 border-blue-500 text-blue-300 font-bold shadow-sm"
                                         : "bg-gray-900 border-gray-800 text-gray-400 hover:bg-gray-800"
                                 }`}
                             >
@@ -447,270 +464,221 @@ function Dispatcher() {
                     </div>
 
                     <div className="flex justify-between items-center pt-1 text-[11px]">
-                        <span className="text-gray-500">Or click map to set depot & stops</span>
+                        <span className="text-gray-500">Click map to set custom Indian stops</span>
                         <button
                             onClick={handleClearAll}
-                            className="text-red-400 hover:text-red-300 cursor-pointer font-medium"
+                            className="text-rose-400 hover:text-rose-300 hover:underline cursor-pointer"
                         >
-                            🧹 Clear Canvas
+                            Clear All
                         </button>
                     </div>
                 </div>
 
-                {/* ── LIVE DRIVER TELEMETRY CARD ── */}
-                {driverTelemetry?.position && (
-                    <div className="px-4 py-3 bg-gradient-to-r from-blue-950/90 to-indigo-950/90 border-b border-blue-900/60 text-white space-y-2">
-                        <div className="flex items-center justify-between">
-                            <span className="text-[11px] font-bold uppercase tracking-wider text-blue-300 flex items-center gap-1.5">
-                                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-                                🚚 Live Driver Telemetry
-                            </span>
-                            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-800/60 text-blue-200">
-                                {driverTelemetry.speed || 0} km/h
-                            </span>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-gray-300">
-                            <div>
-                                <span className="text-gray-400 text-[10px] block">Progress:</span>
-                                <strong>{completedCount} / {totalCount} Done</strong>
-                            </div>
-                            <div>
-                                <span className="text-gray-400 text-[10px] block">Heading:</span>
-                                <strong>{driverTelemetry.heading || 0}°</strong>
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {/* ── DEPOT CONTROLS ── */}
-                <div className="px-4 py-3 border-b border-gray-800">
-                    <div className="flex items-center justify-between mb-2">
-                        <p className="text-xs text-gray-400 uppercase font-semibold tracking-wide">
-                            Depot Hub
-                        </p>
-                        {depot && (
-                            <span className="text-[11px] font-mono text-gray-400">
+                {/* Depot section */}
+                <div className="px-4 py-3 bg-gray-950/40 border-b border-gray-800 flex items-center justify-between">
+                    <div className="text-xs">
+                        <span className="text-gray-400">Depot Hub: </span>
+                        {depot ? (
+                            <span className="text-emerald-400 font-mono font-semibold">
                                 {depot[0].toFixed(4)}, {depot[1].toFixed(4)}
                             </span>
+                        ) : (
+                            <span className="text-amber-400 font-semibold">Not Set</span>
                         )}
                     </div>
-                    
                     <button
-                        onClick={() => setIsDepotMode((prev) => !prev)}
-                        className={`w-full py-2 text-xs font-semibold rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                        onClick={() => setIsDepotMode(!isDepotMode)}
+                        className={`px-3 py-1 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
                             isDepotMode
-                                ? "bg-amber-500 hover:bg-amber-600 text-white shadow-lg shadow-amber-500/20"
-                                : "bg-red-600 hover:bg-red-500 text-white shadow-md shadow-red-600/20"
+                                ? "bg-amber-600 border-amber-500 text-white animate-pulse"
+                                : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700"
                         }`}
                     >
-                        <span>🏭</span>
-                        <span>{isDepotMode ? "Click map to place Depot..." : "Set / Reposition Depot"}</span>
+                        {isDepotMode ? "Click Map to Set Hub" : "🏭 Set Depot"}
                     </button>
                 </div>
 
-                {/* ── ADD / EDIT STOP FORM ── */}
-                <div className="px-4 py-3 border-b border-gray-800">
-                    <AddStopForm
-                        name={name}
-                        latitude={latitude}
-                        longitude={longitude}
-                        priority={priority}
-                        setName={setName}
-                        setLatitude={setLatitude}
-                        setLongitude={setLongitude}
-                        setPriority={setPriority}
-                        onAddStop={handleAddStop}
-                        onCancelEdit={handleCancelEdit}
-                        editingId={editingId}
-                        onLocationSelect={setSelectedPosition}
-                    />
-                </div>
+                {/* Add / Edit stop form */}
+                <AddStopForm
+                    name={name}
+                    setName={setName}
+                    latitude={latitude}
+                    setLatitude={setLatitude}
+                    longitude={longitude}
+                    setLongitude={setLongitude}
+                    priority={priority}
+                    setPriority={setPriority}
+                    editingId={editingId}
+                    onAddStop={handleAddStop}
+                    onCancelEdit={handleCancelEdit}
+                />
 
-                {/* ── STOP LIST ── */}
-                <div className="px-4 py-3 border-b border-gray-800">
-                    <div className="flex items-center justify-between mb-2">
-                        <p className="text-xs text-gray-400 uppercase font-semibold tracking-wide">
-                            Stops Queue ({stops.length})
-                        </p>
-                        {stops.length > 0 && (
-                            <button
-                                onClick={() => setIsManifestModalOpen(true)}
-                                className="text-[11px] text-blue-400 hover:text-blue-300 font-semibold cursor-pointer flex items-center gap-1"
-                            >
-                                <span>📄</span>
-                                <span>Export Manifest</span>
-                            </button>
-                        )}
-                    </div>
-                    <StopList
-                        stops={stops}
-                        onDelete={handleDeleteStop}
-                        onEdit={handleEditStop}
-                    />
-                </div>
+                {/* Stops list */}
+                <StopList
+                    stops={stops}
+                    onEditStop={handleEditStop}
+                    onDeleteStop={handleDeleteStop}
+                />
 
-                {/* ── OPTIMIZATION CONTROLS ── */}
-                <div className="px-4 py-3.5 border-b border-gray-800 space-y-2.5">
-                    <p className="text-xs text-gray-400 uppercase font-semibold tracking-wide">
-                        Algorithm Engine (NN + 2-Opt)
-                    </p>
-                    <div className="flex gap-2">
+                {/* Dispatch / Optimization actions */}
+                <div className="p-4 bg-gray-950/90 border-t border-gray-800 space-y-2 mt-auto">
+                    
+                    {/* Primary Optimize CTA */}
+                    <button
+                        onClick={handleOptimize}
+                        disabled={isOptimizing || stops.length === 0}
+                        className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-800 disabled:text-gray-600 disabled:cursor-not-allowed text-white font-bold text-xs rounded-xl shadow-lg shadow-blue-600/30 transition-all cursor-pointer flex items-center justify-center gap-2"
+                    >
+                        <span>{isOptimizing ? "⚡ Computing Road Matrix & 2-Opt..." : "⚡ Optimize Route (Road Matrix + 2-Opt)"}</span>
+                    </button>
+
+                    {/* Step Visualizer Button */}
+                    {hasOptimized && benchmarkData?.steps?.length > 1 && (
                         <button
-                            onClick={handleOptimize}
-                            disabled={isOptimizing}
-                            className={`flex-1 py-2.5 text-white text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                                isOptimizing
-                                    ? "bg-gray-700 cursor-not-allowed text-gray-400"
-                                    : "bg-blue-600 hover:bg-blue-500 shadow-lg shadow-blue-600/30"
-                            }`}
+                            onClick={() => setIsVisualizerOpen(true)}
+                            className="w-full py-2 bg-indigo-950/60 hover:bg-indigo-900/60 text-indigo-300 border border-indigo-700/60 font-semibold text-xs rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
                         >
-                            <span>⚡</span>
-                            <span>{isOptimizing ? "Optimizing..." : "Optimize Route"}</span>
+                            <span>🔬</span>
+                            <span>Open Step Visualizer ({benchmarkData.steps.length - 1} Swaps)</span>
                         </button>
-                        {hasOptimized && (
-                            <button
-                                onClick={handleResetRoute}
-                                className="px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs font-medium rounded-lg transition-colors cursor-pointer"
-                            >
-                                ✕
-                            </button>
-                        )}
-                    </div>
-                </div>
+                    )}
 
-                {/* ── ALGORITHM BENCHMARK & ESG ECO PANEL ── */}
-                {hasOptimized && benchmarkData && (
-                    <div className="px-4 py-3.5 border-b border-gray-800">
-                        <AlgorithmBenchmark
-                            benchmarkData={benchmarkData}
-                            onOpenVisualizer={() => setIsVisualizerOpen(true)}
-                        />
-                    </div>
-                )}
+                    {/* Manifest Modal Button */}
+                    {hasOptimized && (
+                        <button
+                            onClick={() => setIsManifestModalOpen(true)}
+                            className="w-full py-2 bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-700/60 font-semibold text-xs rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                        >
+                            <span>📄</span>
+                            <span>View & Export Delivery Manifest (CSV)</span>
+                        </button>
+                    )}
 
-                {/* ── PUBLISH ROUTE ── */}
-                {hasOptimized && (
-                    <div className="px-4 py-3.5 border-b border-gray-800 space-y-2.5">
-                        <p className="text-xs text-gray-400 uppercase font-semibold tracking-wide">
-                            Fleet Dispatch
-                        </p>
-
-                        {isPublished ? (
-                            <div className="space-y-2">
-                                <div className="bg-emerald-950/60 border border-emerald-800/60 rounded-xl p-3">
-                                    <p className="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
-                                        <span>✅</span> Route Broadcast to Driver Live!
-                                    </p>
-                                    <p className="text-[11px] text-emerald-400/80 mt-1">
-                                        Driver client is now synchronized via WebSocket telemetry.
-                                    </p>
-                                </div>
-                                <button
-                                    onClick={() => navigate("/driver")}
-                                    className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg shadow transition-all cursor-pointer flex items-center justify-center gap-1.5"
-                                >
-                                    <span>🚚</span>
-                                    <span>Switch to Driver Live View</span>
-                                </button>
-                            </div>
-                        ) : (
+                    {/* Publish / Reset Actions */}
+                    {hasOptimized && (
+                        <div className="flex gap-2 pt-1">
                             <button
                                 onClick={handlePublish}
-                                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg shadow-lg shadow-emerald-600/20 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                                className={`flex-1 py-2.5 rounded-xl font-bold text-xs transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                                    isPublished
+                                        ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/30"
+                                        : "bg-emerald-700 hover:bg-emerald-600 text-white"
+                                }`}
                             >
-                                <span>📤</span>
-                                <span>Publish Route to Driver</span>
+                                <span>{isPublished ? "✅ Route Published to DB & Drivers" : "🚀 Publish Route to DB & Fleet"}</span>
                             </button>
-                        )}
-                    </div>
-                )}
 
-                {/* ── ROUTE SUMMARY ── */}
-                {hasOptimized && (
-                    <div className="px-4 py-3.5">
-                        <RouteSummary
-                            depot={depot}
-                            optimizedStops={optimizedStops}
-                            totalDistance={osrmDistance}
-                        />
-                    </div>
-                )}
+                            <button
+                                onClick={handleResetRoute}
+                                className="px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white rounded-xl text-xs font-semibold border border-gray-700 cursor-pointer"
+                                title="Reset optimization"
+                            >
+                                ↺
+                            </button>
+                        </div>
+                    )}
+                </div>
 
             </aside>
 
-            {/* ── MAP CONTAINER (Full width on mobile when map tab is active) ── */}
-            <div className={`flex-1 h-full relative ${
-                mobileTab === "panel" ? "hidden md:block" : "block"
+            {/* ── MAP VIEW PANEL ───────────────────────────────────── */}
+            <main className={`flex-1 flex flex-col relative ${
+                mobileTab === "panel" ? "hidden md:flex" : "flex"
             }`}>
-                
-                {/* ── ROUTE DEVIATION ALERT BANNER ── */}
+
+                {/* Live Deviation Alert Banner */}
                 {deviationState.isDeviated && (
-                    <div className="absolute top-4 left-4 right-4 z-[1000] max-w-lg mx-auto bg-rose-600 text-white px-4 py-3 rounded-xl shadow-2xl border border-rose-400 flex items-center justify-between animate-bounce">
-                        <div className="flex items-center gap-2">
+                    <div className="absolute top-4 left-4 right-4 z-[1000] bg-rose-950/95 border border-rose-600 rounded-xl p-3.5 shadow-2xl backdrop-blur-md flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-white animate-bounce">
+                        <div className="flex items-center gap-2.5">
                             <span className="text-xl">⚠️</span>
                             <div>
-                                <h4 className="text-xs font-bold uppercase tracking-wide">
-                                    Driver Off-Route Detected!
-                                </h4>
-                                <p className="text-[11px] text-rose-100">
-                                    Vehicle is ~{deviationState.distanceMeters}m off scheduled polyline.
-                                </p>
+                                <strong className="font-bold text-rose-300">Route Deviation Detected: </strong>
+                                <span>Vehicle is ~{Math.round(deviationState.distanceMeters)}m off scheduled road polyline.</span>
                             </div>
                         </div>
 
-                        <button
-                            onClick={handleReoptimizeFromDriver}
-                            className="px-3 py-1.5 bg-white text-rose-700 hover:bg-rose-50 text-xs font-bold rounded-lg shadow transition-all cursor-pointer whitespace-nowrap"
-                        >
-                            ⚡ Re-Optimize
-                        </button>
+                        <div className="flex items-center gap-2 w-full sm:w-auto">
+                            <button
+                                onClick={handleReoptimizeFromDriver}
+                                className="flex-1 sm:flex-none px-3.5 py-1.5 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-lg transition-colors cursor-pointer shadow"
+                            >
+                                🔄 Dynamic Re-Route
+                            </button>
+                        </div>
                     </div>
                 )}
 
-                {/* Visualizer Floating Overlay */}
-                {isVisualizerOpen && benchmarkData?.steps && (
-                    <AlgorithmVisualizer
-                        steps={benchmarkData.steps}
-                        onClose={handleCloseVisualizer}
-                        onStepSelect={handleVisualizerStepSelect}
+                {/* Top Overlay Bar: Route Stats */}
+                <div className="absolute top-4 left-4 z-[999] pointer-events-none hidden sm:block">
+                    <RouteSummary
+                        stops={hasOptimized ? optimizedStops : stops}
+                        depot={depot}
+                        hasOptimized={hasOptimized}
+                        osrmDistance={osrmDistance}
                     />
+                </div>
+
+                {/* Top Overlay Bar: Algorithm Comparative Audit */}
+                {hasOptimized && benchmarkData && (
+                    <div className="absolute top-4 right-4 z-[999] pointer-events-none max-w-sm hidden lg:block">
+                        <AlgorithmBenchmark benchmarkData={benchmarkData} />
+                    </div>
                 )}
 
-                {/* Depot Mode Overlay Banner */}
-                {isDepotMode && (
-                    <div className="absolute top-0 left-0 right-0 z-[1000] bg-amber-500 text-white text-center text-xs py-2 font-bold shadow-lg">
-                        🏭 Depot mode active — click anywhere on the map to place your depot hub
+                {/* Bottom Overlay: Driver Live Status Pill */}
+                {isPublished && (
+                    <div className="absolute bottom-4 left-4 z-[999] bg-gray-900/90 border border-gray-700/80 rounded-xl px-4 py-2.5 shadow-2xl backdrop-blur-md flex items-center gap-3 text-xs">
+                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                        <div>
+                            <p className="font-bold text-white">
+                                {driverTelemetry?.isLive ? "🟢 Driver Streaming Live GPS" : driverTelemetry?.isSimulating ? "⚡ Drive Simulation Running" : "🟡 Route Dispatched & Awaiting Driver"}
+                            </p>
+                            <p className="text-[11px] text-gray-400">
+                                Completed: <strong className="text-emerald-400">{completedCount}</strong> / {totalCount} Stops ({totalCount > 0 ? Math.round((completedCount/totalCount)*100) : 0}%)
+                            </p>
+                        </div>
+
                         <button
-                            onClick={() => setIsDepotMode(false)}
-                            className="ml-3 underline hover:no-underline text-amber-100 cursor-pointer font-semibold"
+                            onClick={() => navigate("/driver")}
+                            className="ml-2 px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white font-bold text-[11px] rounded-lg transition-colors cursor-pointer"
                         >
-                            Cancel
+                            Open Driver View →
                         </button>
                     </div>
                 )}
 
+                {/* Leaflet Map Component */}
                 <MapView
-                    stops={stops}
+                    stops={hasOptimized ? optimizedStops : stops}
                     depot={depot}
-                    onMapClick={handleMapClick}
+                    isDepotMode={isDepotMode}
                     selectedPosition={selectedPosition}
+                    onMapClick={handleMapClick}
                     routePositions={activeRoutePositions}
-                    driverPosition={driverTelemetry?.position}
+                    driverPosition={driverTelemetry?.currentPosition || null}
                     driverHeading={driverTelemetry?.heading || 0}
-                    isDeviated={deviationState.isDeviated}
+                    completedStopIds={completedStopIds}
                 />
-            </div>
 
-            {/* Delivery Manifest Modal */}
+            </main>
+
+            {/* ── ALGORITHM STEP VISUALIZER MODAL ───────────────────────── */}
+            <AlgorithmVisualizer
+                isOpen={isVisualizerOpen}
+                onClose={handleCloseVisualizer}
+                steps={benchmarkData?.steps || []}
+                depot={depot}
+                onSelectStep={handleVisualizerStepSelect}
+            />
+
+            {/* ── DELIVERY MANIFEST MODAL ───────────────────────────────── */}
             <ManifestModal
                 isOpen={isManifestModalOpen}
                 onClose={() => setIsManifestModalOpen(false)}
-                stops={hasOptimized && optimizedStops.length > 0 ? optimizedStops : stops}
+                stops={hasOptimized ? optimizedStops : stops}
                 depot={depot}
-                totalDistance={osrmDistance}
-                benchmarkData={benchmarkData}
-                completedIds={completedStopIds}
+                distanceKm={osrmDistance || benchmarkData?.twoOptDistance || 0}
+                benchmark={benchmarkData}
             />
 
         </div>

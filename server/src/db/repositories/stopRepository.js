@@ -1,4 +1,4 @@
-import { query, isDbConnected } from "../connection.js";
+import { query, isDbConnected, getPool } from "../connection.js";
 import { store } from "../../models/store.js";
 
 // ─── Stop Repository (Unified Database + In-Memory Access) ─────────────────
@@ -63,6 +63,54 @@ export const stopRepository = {
             status: "pending"
         };
         return store.addStop(newStop);
+    },
+
+    async setBatch(stops, createdBy = null) {
+        if (isDbConnected()) {
+            const pool = getPool();
+            const client = await pool.connect();
+            try {
+                await client.query("BEGIN");
+                await client.query("DELETE FROM stops");
+
+                const savedStops = [];
+                for (const s of stops) {
+                    const res = await client.query(
+                        `INSERT INTO stops (name, latitude, longitude, priority, created_by)
+                         VALUES ($1, $2, $3, $4, $5)
+                         RETURNING *`,
+                        [s.name, s.position[0], s.position[1], s.priority || "standard", createdBy]
+                    );
+                    const row = res.rows[0];
+                    savedStops.push({
+                        id: row.id,
+                        name: row.name,
+                        position: [row.latitude, row.longitude],
+                        priority: row.priority,
+                        status: row.status,
+                        createdAt: row.created_at
+                    });
+                }
+
+                await client.query("COMMIT");
+                store.stops = [...savedStops];
+                return savedStops;
+            } catch (err) {
+                await client.query("ROLLBACK");
+                throw err;
+            } finally {
+                client.release();
+            }
+        }
+
+        store.stops = stops.map((s, idx) => ({
+            id: s.id || Date.now() + idx,
+            name: s.name,
+            position: [Number(s.position[0]), Number(s.position[1])],
+            priority: s.priority || "standard",
+            status: "pending"
+        }));
+        return store.getStops();
     },
 
     async delete(id) {
